@@ -5,6 +5,7 @@ import pickle
 import wandb
 import argparse
 import json
+import math
 import numpy as np
 from models.gpt import GPT2Config, GPT
 from contextlib import nullcontext
@@ -167,7 +168,7 @@ if wandb_log:
 # training loop
 X, Y = get_batch('train') # first batch
 t0 = time.time()
-for it in tqdm(range(iter_num, max_iters), desc="Training"):
+for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
     # set learning rate
     lr = get_lr(it)
     for param_group in optimizer.param_groups:
@@ -176,7 +177,7 @@ for it in tqdm(range(iter_num, max_iters), desc="Training"):
     # eval
     if it % eval_interval == 0:
         losses = estimate_loss()
-        tqdm.write(f"iter {it} | train loss: {losses['train']} | val loss: {losses['val']} | time: {time.time() - t0}")
+        pbar.set_description(f"Training | Loss: {losses['train']:.4f}")
         if wandb_log:
             wandb.log({
                 'train/loss': losses['train'], 
@@ -189,7 +190,7 @@ for it in tqdm(range(iter_num, max_iters), desc="Training"):
             best_val_loss = losses['val']
             if it > 0:
                 checkpoint = {
-                    'model': raw_model.state_dict(),
+                    'model': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'model_args': model_args,
                     'iter_num': iter_num,
@@ -231,6 +232,6 @@ for it in tqdm(range(iter_num, max_iters), desc="Training"):
         # get loss as float. note: this is a CPU-GPU sync point
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
+        pbar.set_description(f"Training | Loss: {lossf:.5f}")
     
     
