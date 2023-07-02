@@ -3,6 +3,8 @@ import time
 import torch
 import pickle
 import wandb
+import argparse
+import json
 import numpy as np
 from models.gpt import GPT2Config, GPT
 from contextlib import nullcontext
@@ -49,13 +51,21 @@ min_lr = 6e-5
 # system
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = False # change when in linux for pytorch 2.0
+compile = True # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=dtype)
-
+# override globals with json file
+argparser = argparse.ArgumentParser()
+argparser.add_argument('--config', type=str, default=None, help='json file name in configs folder')
+args = argparser.parse_args()
+if args.config is not None:
+    with open(os.path.join('configs', args.config+'.json'), 'r') as f:
+        config = json.load(f)
+    for k,v in config.items():
+        globals()[k] = v
 #--------------------------------------------------------------------------------
 
 # Poor man's data loader
