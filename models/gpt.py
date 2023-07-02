@@ -82,8 +82,8 @@ class Block(nn.Module):
         super().__init__()
         self.csa = MultiHeadAttention(config)
         self.ff = FeedForward(config)
-        self.ln1 = LayerNorm(config)
-        self.ln2 = LayerNorm(config)
+        self.ln1 = LayerNorm(config.n_embd, config.bias)
+        self.ln2 = LayerNorm(config.n_embd, config.bias)
     
     def forward(self, x):
         # layer norm, attention, residual
@@ -94,7 +94,7 @@ class Block(nn.Module):
 
 @dataclass
 class GPT2Config:
-    block_size: int = 1024
+    ctx_size: int = 1024
     # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     vocab_size: int = 50304
     n_layer: int = 12
@@ -113,7 +113,7 @@ class GPT(nn.Module):
         self.pos_embd = nn.Embedding(config.ctx_size, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
         self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
-        self.ln = LayerNorm(config)
+        self.ln = LayerNorm(config.n_embd, config.bias)
         self.ff = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # initialize weights
         self.apply(self._init_weights)

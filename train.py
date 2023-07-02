@@ -3,7 +3,8 @@ import time
 import torch
 import pickle
 import wandb
-from models.gpt import GPTConfig, GPT
+import numpy as np
+from models.gpt import GPT2Config, GPT
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -19,12 +20,13 @@ eval_iters = 200
 eval_only = False # set to true to only run evaluation
 always_save = True # set to true to always save the model after evaluation
 # wandb logging
-wandb_log = False
+wandb_log = True
 wandb_project = 'fadeformer'
-wandb_run_name = 'gpt2'
+wandb_run_name = 'gpt2-testing'
 # data
-dataset = 'kon'
+dataset = 'shakespeare'
 batch_size = 16
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 # model
 ctx_size = 1024
 n_layer = 12
@@ -52,7 +54,7 @@ compile = False # change when in linux for pytorch 2.0
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(device_type=device.type, dtype=dtype)
+ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=dtype)
 
 #--------------------------------------------------------------------------------
 
@@ -65,11 +67,11 @@ val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     # get random indices for each batch
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-    if device_type == 'cuda':
+    x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
+    if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
@@ -105,7 +107,7 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
+    gptconf = GPT2Config(**model_args)
     model = GPT(gptconf)
 # TODO: add support for loading from a checkpoint
 
@@ -150,7 +152,7 @@ def estimate_loss():
 
 # logging
 if wandb_log:
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb.init(project=wandb_project, name=wandb_run_name)
 
 # training loop
 X, Y = get_batch('train') # first batch
