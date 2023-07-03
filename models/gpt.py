@@ -93,7 +93,7 @@ class Block(nn.Module):
         return out
 
 @dataclass
-class GPT2Config:
+class GPTConfig:
     ctx_size: int = 1024
     # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     vocab_size: int = 50304

@@ -7,7 +7,7 @@ import argparse
 import json
 import math
 import numpy as np
-from models.gpt import GPT2Config, GPT
+from models.gpt import GPTConfig, GPT
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -118,9 +118,13 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPT2Config(**model_args)
+    gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 # TODO: add support for loading from a checkpoint
+
+# print parameter count of model
+num_params = sum(p.numel() for p in model.parameters())
+print(f"Number of parameters: {num_params}")
 
 model.to(device)
 
@@ -170,9 +174,9 @@ X, Y = get_batch('train') # first batch
 t0 = time.time()
 for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
     # set learning rate
-    lr = get_lr(it)
+    learning_rate = get_lr(it)
     for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+        param_group['lr'] = learning_rate
 
     # eval
     if it % eval_interval == 0:
@@ -183,7 +187,7 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                 'train/loss': losses['train'], 
                 'val/loss': losses['val'], 
                 'iter': it,
-                'lr': lr
+                'lr': learning_rate
             })
         # save best
         if losses['val'] < best_val_loss or always_save:

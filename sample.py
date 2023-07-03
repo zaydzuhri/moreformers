@@ -6,7 +6,7 @@ import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
-from models.gpt import GPT2Config, GPT
+from models.gpt import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -30,7 +30,7 @@ ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=p
 # init from a model saved in a specific directory
 ckpt_path = os.path.join(out_dir, 'ckpt.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
-gptconf = GPT2Config(**checkpoint['model_args'])
+gptconf = GPTConfig(**checkpoint['model_args'])
 model = GPT(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
