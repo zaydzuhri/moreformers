@@ -8,6 +8,7 @@ import json
 import math
 import numpy as np
 from models.gpt import GPTConfig, GPT
+from models.fadeformer_linear import FadeFormerLinear
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -31,6 +32,8 @@ dataset = 'shakespeare'
 batch_size = 16
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 # model
+model_type = 'gpt' # 'gpt' or 'fadeformer'
+model_name = 'gpt2'
 ctx_size = 1024
 n_layer = 12
 n_head = 12
@@ -119,11 +122,14 @@ if init_from == 'scratch':
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
     gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    if model_type == 'gpt':
+        model = GPT(gptconf)
+    elif model_type == 'fadeformer-linear':
+        model = FadeFormerLinear(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
-num_params = sum(p.numel() for p in model.parameters())
+num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
 
 model.to(device)
@@ -202,7 +208,7 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, model_name+'.pt'))
     if it == 0 and eval_only:
         break
 

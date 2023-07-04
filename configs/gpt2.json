@@ -12,6 +12,8 @@
     "dataset": "shakespeare",
     "batch_size": 16,
     "gradient_accumulation_steps": 40,
+    "model_type": "gpt",
+    "model_name": "gpt2",
     "ctx_size": 1024,
     "n_layer": 12,
     "n_head": 12,

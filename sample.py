@@ -6,10 +6,12 @@ import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
+import argparse
 from models.gpt import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
+model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
@@ -19,6 +21,11 @@ seed = 69
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
+
+argparser = argparse.ArgumentParser()
+argparser.add_argument('--model_name', type=str, default=model_name)
+args = argparser.parse_args()
+model_name = args.model_name
 # -----------------------------------------------------------------------------
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
@@ -28,7 +35,7 @@ ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torc
 ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=ptdtype)
 
 # init from a model saved in a specific directory
-ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+ckpt_path = os.path.join(out_dir, model_name+'.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
 gptconf = GPTConfig(**checkpoint['model_args'])
 model = GPT(gptconf)
