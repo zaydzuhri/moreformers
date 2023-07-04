@@ -20,14 +20,14 @@
     "n_embd": 384,
     "dropout": 0.2,
     "bias": false,
-    "lr": 1e-3,
+    "lr": 1e-4,
     "max_iters": 5000,
     "weight_decay": 0.1,
     "beta1": 0.9,
     "beta2": 0.95,
     "grad_clip": 1.0,
-    "warmup_iters": 100,
+    "warmup_iters": 1000,
     "decay_lr": true,
     "lr_decay_iters": 5000,
-    "min_lr": 1e-4
+    "min_lr": 1e-5
 }

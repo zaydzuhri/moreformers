@@ -35,6 +35,7 @@ gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 model_type = 'gpt' # 'gpt' or 'fadeformer'
 model_name = 'gpt2'
 ctx_size = 1024
+target_size = ctx_size # for fadeformer
 n_layer = 12
 n_head = 12
 n_embd = 768
@@ -54,6 +55,7 @@ lr_decay_iters = 600000
 min_lr = 6e-5
 # system
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
 compile = True # change when in linux for pytorch 2.0
 # torch
@@ -84,7 +86,10 @@ def get_batch(split):
     ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
     x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
+    if model_type == 'gpt':
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
+    elif model_type == 'fadeformer-linear':
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)

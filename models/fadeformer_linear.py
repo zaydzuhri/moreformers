@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 def calc_fade(n_input):
     fade_steps = [n_input]
-    while n_input > 32:
+    while n_input > 64:
         n_output = n_input//2
         fade_steps.append(n_output)
         n_input = n_output
@@ -127,6 +127,8 @@ class FadingBlock(nn.Module):
         out = out + self.ff(self.ln2(out))
         # fade
         out = self.fade(out)
+        # # fade and add half the time dimension of the previous output (residual)
+        # out = out[:, out.shape[1]//2:] + self.fade(out)
         return out
 
 # FadeFormer Model
@@ -189,10 +191,14 @@ class FadeFormerLinear(nn.Module):
     @torch.no_grad()
     def generate(self, x, max_new_tokens, temperature=1.0, top_k=None):
         for _ in range(max_new_tokens):
-            # crop context if needed
-            x_crop = x if x.size(1) <= self.config.ctx_size else x[:, -self.config.ctx_size:]
+            # crop or pad context if needed
+            # if x.size(1) > self.config.ctx_size:
+            #     x_in =  x[:, -self.config.ctx_size:]
+            # else:
+            #     x_in = F.pad(x, (self.config.ctx_size - x.size(1), 0), value=0)
+            x_in =  x[:, -self.config.ctx_size:]
             # forward pass
-            logits, _ = self.forward(x_crop)
+            logits, _ = self.forward(x_in)
             # get logits of the last token and apply temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop probabilities to only the top k options

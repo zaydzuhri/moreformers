@@ -8,9 +8,11 @@ import torch
 import tiktoken
 import argparse
 from models.gpt import GPTConfig, GPT
+from models.fadeformer_linear import FadeFormerLinear
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
+model_type = 'gpt'
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 10 # number of samples to draw
@@ -23,9 +25,13 @@ dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported
 compile = False # use PyTorch 2.0 to compile the model to be faster
 
 argparser = argparse.ArgumentParser()
+argparser.add_argument('--start', type=str, default=start)
+argparser.add_argument('--model_type', type=str, default=model_type)
 argparser.add_argument('--model_name', type=str, default=model_name)
 args = argparser.parse_args()
+start = args.start
 model_name = args.model_name
+model_type = args.model_type
 # -----------------------------------------------------------------------------
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
@@ -38,7 +44,10 @@ ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=p
 ckpt_path = os.path.join(out_dir, model_name+'.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
 gptconf = GPTConfig(**checkpoint['model_args'])
-model = GPT(gptconf)
+if model_type == 'gpt':
+    model = GPT(gptconf)
+elif model_type == 'fadeformer-linear':
+    model = FadeFormerLinear(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):
