@@ -9,6 +9,7 @@ import math
 import numpy as np
 from models.gpt import GPTConfig, GPT
 from models.fadeformer_linear import FadeFormerLinear
+from models.fadeformer_rank import FadeFormerRank
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -57,7 +58,7 @@ min_lr = 6e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = True # change when in linux for pytorch 2.0
+compile = False # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -89,6 +90,9 @@ def get_batch(split):
     if model_type == 'gpt':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-linear':
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
+    elif model_type == 'fadeformer-rank':
+        target_size = int(ctx_size // (2**n_layer))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
@@ -131,6 +135,8 @@ if init_from == 'scratch':
         model = GPT(gptconf)
     elif model_type == 'fadeformer-linear':
         model = FadeFormerLinear(gptconf)
+    elif model_type == 'fadeformer-rank':
+        model = FadeFormerRank(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
@@ -212,7 +218,7 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                print(f"saving checkpoint to {out_dir}")
+                pbar.set_description(f"Training | Loss: {losses['train']:.4f} | Saving to {out_dir}/{model_name}.pt")
                 torch.save(checkpoint, os.path.join(out_dir, model_name+'.pt'))
     if it == 0 and eval_only:
         break

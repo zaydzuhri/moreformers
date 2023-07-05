@@ -9,6 +9,7 @@ import tiktoken
 import argparse
 from models.gpt import GPTConfig, GPT
 from models.fadeformer_linear import FadeFormerLinear
+from models.fadeformer_rank import FadeFormerRank
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -48,6 +49,8 @@ if model_type == 'gpt':
     model = GPT(gptconf)
 elif model_type == 'fadeformer-linear':
     model = FadeFormerLinear(gptconf)
+elif model_type == 'fadeformer-rank':
+    model = FadeFormerRank(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):
