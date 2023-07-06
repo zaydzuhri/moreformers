@@ -26,7 +26,7 @@
     "beta1": 0.9,
     "beta2": 0.95,
     "grad_clip": 1.0,
-    "warmup_iters": 2000,
+    "warmup_iters": 1000,
     "decay_lr": true,
     "lr_decay_iters": 5000,
     "min_lr": 1e-5

@@ -18,45 +18,44 @@ class LayerNorm(nn.Module):
         return F.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
 
 # Causal Self Attention Head without flash attention
-# Ranked fading attention
-class HalfAttentionHead(nn.Module):
-    """ one head of half self-attention """
-
-    def __init__(self, config, layer):
+class Head(nn.Module):
+    def __init__(self, config):
         super().__init__()
         head_size = config.n_embd // config.n_head
-        self.key = nn.Linear(config.n_embd, head_size, bias=False)
-        self.query = nn.Linear(config.n_embd, head_size, bias=False)
-        self.value = nn.Linear(config.n_embd, head_size, bias=False)
+        self.query = nn.Linear(config.n_embd, head_size)
+        self.key = nn.Linear(config.n_embd, head_size)
+        self.value = nn.Linear(config.n_embd, head_size)
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
-
+        self.dropout = nn.Dropout(config.dropout)
+    
     def forward(self, x):
         B, T, C = x.shape
-        q = self.query(x)  # (B,T,C) -> (B,T,H)
-        k = self.key(x)  # (B,T,C) -> (B,T,H)
-        wei = q @ k.transpose(-2, -1)  # (B,T,H) @ (B,H,T) -> (B,T,T)
-        # fading?
-        row_sums = wei.sum(dim=-1)
-        topk_values, topk_indices = row_sums.topk(k=math.ceil(T/2), dim=1)
-        topk_indices = topk_indices.sort(dim=1).values
-        expanded_indices = topk_indices.unsqueeze(-1).expand(-1, -1, wei.shape[-1])
-        half_wei = wei.gather(dim=1, index=expanded_indices)
-        tril = self.tril[:T, :T]
-        half_mask = tril[topk_indices]
-        half_wei = half_wei * C ** -0.5  # scaled attention as to not sharpen softmax\
-        half_wei = half_wei.masked_fill(half_mask == 0, float('-inf'))
-        half_wei = F.softmax(half_wei, dim=-1)
+        # get query and key projections
+        q = self.query(x) # (B, T, C)
+        k = self.key(x) # (B, T, C)
+        # compute attention "affinities", scale, mask, and softmax
+        att = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
+        att = att * C ** (-0.5)
 
-        # perform the weighted aggregation of the values
-        v = self.value(x)
-        out = half_wei @ v
+        keep = [(T-1)-x for x in range(math.ceil(T/4))]
+        a = math.ceil(T/4)
+        keep = keep + [(T-1)-math.ceil((3/a)*((x-a)**2)+a) for x in range(math.ceil(T/4), math.ceil(T/2))]
+        keep = list(reversed(keep))
+        fade_tril = self.tril[keep, :T]
+        att = att[:, keep, :]
+        att = att.masked_fill(fade_tril == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.dropout(att)
+        # apply attention to value projection
+        v = self.value(x) # (B, T, C)
+        out = att @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
 
 # Parallel attention heads
 class MultiHeadAttention(nn.Module):
-    def __init__(self, config, layer):
+    def __init__(self, config):
         super().__init__()
-        self.heads = nn.ModuleList([HalfAttentionHead(config, layer) for _ in range(config.n_head)])
+        self.heads = nn.ModuleList([Head(config) for _ in range(config.n_head)])
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias) # linear for dropout
         self.dropout = nn.Dropout(config.dropout)
 
@@ -86,9 +85,9 @@ class FeedForward(nn.Module):
 
 # Transformer block, attention for "communication", feedforward for "computation"
 class Block(nn.Module):
-    def __init__(self, config, layer):
+    def __init__(self, config):
         super().__init__()
-        self.csa = MultiHeadAttention(config, layer)
+        self.csa = MultiHeadAttention(config)
         self.ff = FeedForward(config)
         self.ln1 = LayerNorm(config.n_embd, config.bias)
         self.ln2 = LayerNorm(config.n_embd, config.bias)
@@ -101,27 +100,15 @@ class Block(nn.Module):
         out = out + self.ff(self.ln2(out))
         return out
 
-@dataclass
-class GPTConfig:
-    ctx_size: int = 1024
-    # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    vocab_size: int = 50304
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    bias: bool = True
-
 # GPT Model
-class FadeFormerRank(nn.Module):
+class FadeFormerStatic(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.tok_embd = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embd = nn.Embedding(config.ctx_size, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.Sequential(*[Block(config, layer) for layer in range(config.n_layer)])
+        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
         self.ln = LayerNorm(config.n_embd, config.bias)
         self.ff = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # initialize weights
@@ -161,7 +148,7 @@ class FadeFormerRank(nn.Module):
             # if we are just doing inference
             # inference-time mini-optimization: only forward the lm_head on the very last position
             # note: using list [-1] to preserve the time dimension
-            logits = self.ff(x) # (B, T, V)
+            logits = self.ff(x[:, [-1], :]) # (B, T, V)
             loss = None
             
         return logits, loss

@@ -10,13 +10,14 @@ import argparse
 from models.gpt import GPTConfig, GPT
 from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
+from models.fadeformer_static import FadeFormerStatic
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
 model_type = 'gpt'
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 10 # number of samples to draw
+num_samples = 1 # number of samples to draw
 max_new_tokens = 500 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -51,6 +52,8 @@ elif model_type == 'fadeformer-linear':
     model = FadeFormerLinear(gptconf)
 elif model_type == 'fadeformer-rank':
     model = FadeFormerRank(gptconf)
+elif model_type == 'fadeformer-static':
+    model = FadeFormerStatic(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):

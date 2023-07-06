@@ -10,6 +10,7 @@ import numpy as np
 from models.gpt import GPTConfig, GPT
 from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
+from models.fadeformer_static import FadeFormerStatic
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -94,6 +95,9 @@ def get_batch(split):
     elif model_type == 'fadeformer-rank':
         target_size = int(ctx_size // (2**n_layer))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
+    elif model_type == 'fadeformer-static':
+        target_size = int(ctx_size // (2**n_layer))
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -137,6 +141,8 @@ if init_from == 'scratch':
         model = FadeFormerLinear(gptconf)
     elif model_type == 'fadeformer-rank':
         model = FadeFormerRank(gptconf)
+    elif model_type == 'fadeformer-static':
+        model = FadeFormerStatic(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
