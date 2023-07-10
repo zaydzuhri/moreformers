@@ -8,7 +8,7 @@
     "always_save": true,
     "wandb_log": true,
     "wandb_project": "fadeformer",
-    "wandb_run_name": "fadeformer-static-testing",
+    "wandb_run_name": "fadeformer-static",
     "dataset": "shakespeare",
     "batch_size": 32,
     "gradient_accumulation_steps": 1,
@@ -20,7 +20,7 @@
     "n_embd": 384,
     "dropout": 0.2,
     "bias": false,
-    "lr": 1e-4,
+    "lr": 5e-4,
     "max_iters": 5000,
     "weight_decay": 0.1,
     "beta1": 0.9,
@@ -29,5 +29,5 @@
     "warmup_iters": 1000,
     "decay_lr": true,
     "lr_decay_iters": 5000,
-    "min_lr": 1e-5
+    "min_lr": 5e-5
 }

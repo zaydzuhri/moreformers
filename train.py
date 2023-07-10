@@ -96,7 +96,7 @@ def get_batch(split):
         target_size = int(ctx_size // (2**n_layer))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-static':
-        target_size = int(ctx_size // (2**n_layer))
+        target_size = int(ctx_size // (2**(n_layer-2)))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)

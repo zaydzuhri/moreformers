@@ -19,8 +19,11 @@ class LayerNorm(nn.Module):
 
 # Causal Self Attention Head without flash attention
 class Head(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, fade=True, layer=0):
         super().__init__()
+        self.fade = fade
+        self.layer = layer
+        self.ctx_size = config.ctx_size
         head_size = config.n_embd // config.n_head
         self.query = nn.Linear(config.n_embd, head_size)
         self.key = nn.Linear(config.n_embd, head_size)
@@ -36,26 +39,37 @@ class Head(nn.Module):
         # compute attention "affinities", scale, mask, and softmax
         att = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
         att = att * C ** (-0.5)
-
-        keep = [(T-1)-x for x in range(math.ceil(T/4))]
-        a = math.ceil(T/4)
-        keep = keep + [(T-1)-math.ceil((3/a)*((x-a)**2)+a) for x in range(math.ceil(T/4), math.ceil(T/2))]
-        keep = list(reversed(keep))
-        fade_tril = self.tril[keep, :T]
-        att = att[:, keep, :]
-        att = att.masked_fill(fade_tril == 0, float('-inf'))
+        if self.fade:
+            # get max designed input length for this layer
+            t = self.ctx_size // (2**self.layer)
+            # construct fading mask
+            keep = [(t-1)-x for x in range(math.ceil(t/4))]
+            a = math.ceil(t/4)
+            keep = keep + [(t-1)-math.ceil((3/a)*((x-a)**2)+a) for x in range(math.ceil(t/4), math.ceil(t/2))]
+            keep = list(reversed(keep))
+            fade_tril = self.tril[keep, :t]
+            # pad attention matrix to match fading mask, mask out, and unpad
+            att = F.pad(att, (t-T, 0, t-T, 0), value=0)
+            att = att[:, keep, :]
+            att = att.masked_fill(fade_tril == 0, float('-inf'))
+            att = att[:, -min(T, t//2):, -T:]
+            att = att[:, att[0, :, 0] != float('-inf'), :]
+        else:
+            fade_tril = self.tril[:T, :T]
+            att = att.masked_fill(fade_tril == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
         # apply attention to value projection
         v = self.value(x) # (B, T, C)
         out = att @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        # add residual
         return out
 
 # Parallel attention heads
 class MultiHeadAttention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, fade=True, layer=0):
         super().__init__()
-        self.heads = nn.ModuleList([Head(config) for _ in range(config.n_head)])
+        self.heads = nn.ModuleList([Head(config, fade, layer) for _ in range(config.n_head)])
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias) # linear for dropout
         self.dropout = nn.Dropout(config.dropout)
 
@@ -85,17 +99,20 @@ class FeedForward(nn.Module):
 
 # Transformer block, attention for "communication", feedforward for "computation"
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, fade=True, layer=0):
         super().__init__()
-        self.csa = MultiHeadAttention(config)
+        self.fade = fade
+        self.layer = layer
+        self.csa = MultiHeadAttention(config, fade, layer)
         self.ff = FeedForward(config)
         self.ln1 = LayerNorm(config.n_embd, config.bias)
         self.ln2 = LayerNorm(config.n_embd, config.bias)
     
     def forward(self, x):
         # layer norm, attention, and add half the residual
-        half_residual = x[:, :math.ceil(x.shape[1]/2)]
-        out = half_residual + self.csa(self.ln1(x))
+        out = self.csa(self.ln1(x))
+        res = x[:, -out.shape[1]:] if self.fade else x
+        out = res + out
         # layer norm, feedforward, residual
         out = out + self.ff(self.ln2(out))
         return out
@@ -108,7 +125,9 @@ class FadeFormerStatic(nn.Module):
         self.tok_embd = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embd = nn.Embedding(config.ctx_size, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.Sequential(*[Block(config) for _ in range(config.n_layer)])
+        self.pre_block = Block(config, fade=False)
+        self.blocks = nn.Sequential(*[Block(config, layer=i) for i in range(config.n_layer-2)])
+        self.post_block = Block(config, fade=False)
         self.ln = LayerNorm(config.n_embd, config.bias)
         self.ff = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # initialize weights
@@ -137,7 +156,9 @@ class FadeFormerStatic(nn.Module):
         # add them up, apply dropout
         x = self.dropout(tok_embd + pos_embd) # (B, T, C)
         # apply transformer blocks then layer norm
+        x = self.pre_block(x) # (B, T, C)
         x = self.blocks(x) # (B, T, C)
+        x = self.post_block(x) # (B, T, C)
         x = self.ln(x) # (B, T, C)
 
         if targets is not None:
@@ -150,7 +171,6 @@ class FadeFormerStatic(nn.Module):
             # note: using list [-1] to preserve the time dimension
             logits = self.ff(x[:, [-1], :]) # (B, T, V)
             loss = None
-            
         return logits, loss
     
     @torch.no_grad()
