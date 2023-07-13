@@ -11,6 +11,7 @@ from models.gpt import GPTConfig, GPT
 from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
 from models.fadeformer_static import FadeFormerStatic
+from models.fadeformer_stagger import FadeFormerStagger
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -98,6 +99,9 @@ def get_batch(split):
     elif model_type == 'fadeformer-static':
         target_size = int(ctx_size // (2**(n_layer-2)))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
+    elif model_type == 'fadeformer-stagger':
+        target_size = int(ctx_size // (2**(n_layer-2)))
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -143,6 +147,8 @@ if init_from == 'scratch':
         model = FadeFormerRank(gptconf)
     elif model_type == 'fadeformer-static':
         model = FadeFormerStatic(gptconf)
+    elif model_type == 'fadeformer-stagger':
+        model = FadeFormerStagger(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
@@ -188,6 +194,36 @@ def estimate_loss():
     model.train()
     return out
 
+# function for measuring perplexity of transformer language models
+@torch.no_grad()
+def measure_perplexity():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in tqdm(range(eval_iters)):
+            X, Y = get_batch(split)
+            with ctx:
+                # use a sliding window to compute log-likelihoods
+                window_size = ctx_size # maximum context size of the model
+                log_probs = torch.zeros(Y.shape) # store log probabilities of each token
+                for i in range(0, Y.shape[1], window_size):
+                    # get the input and target segments
+                    input_ids = X[:, i:i+window_size]
+                    labels = Y[:, i:i+window_size]
+                    # get the model outputs
+                    outputs = model(input_ids, labels=labels)
+                    # get the log probabilities of the target tokens
+                    log_probs[:, i:i+window_size] = outputs.logits.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+                # compute the average negative log-likelihood
+                loss = -log_probs[Y != -100].mean()
+            losses[k] = loss.item()
+        # compute the perplexity as the exponentiation of the loss
+        out[split] = torch.exp(losses).mean()
+    model.train()
+    return out
+
+
 # logging
 if wandb_log:
     wandb.init(project=wandb_project, name=wandb_run_name)
@@ -204,11 +240,14 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
     # eval
     if it % eval_interval == 0:
         losses = estimate_loss()
+        perplexities = measure_perplexity()
         pbar.set_description(f"Training | Loss: {losses['train']:.4f}")
         if wandb_log:
             wandb.log({
                 'train/loss': losses['train'], 
                 'val/loss': losses['val'], 
+                'train/perplexity': perplexities['train'],
+                'val/perplexity': perplexities['val'],
                 'iter': it,
                 'lr': learning_rate
             })
@@ -227,6 +266,10 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                 pbar.set_description(f"Training | Loss: {losses['train']:.4f} | Saving to {out_dir}/{model_name}.pt")
                 torch.save(checkpoint, os.path.join(out_dir, model_name+'.pt'))
     if it == 0 and eval_only:
+        print("train/loss: ", losses['train'])
+        print("val/loss: ", losses['val'])
+        print("train/perplexity: ", perplexities['train'])
+        print("val/perplexity: ", perplexities['val'])
         break
 
     # forward and backward pass with gradient accumulation
