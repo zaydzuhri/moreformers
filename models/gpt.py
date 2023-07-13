@@ -6,6 +6,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import pickle
+
+log = False
 
 # Layer normalization with optional bias
 class LayerNorm(nn.Module):
@@ -27,6 +30,9 @@ class Head(nn.Module):
         self.value = nn.Linear(config.n_embd, head_size)
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
         self.dropout = nn.Dropout(config.dropout)
+        if log:
+            # create a file to log the attention matrix
+            self.log_file = open('logs/attention_log.pkl', 'wb') # open the file in write binary mode
     
     def forward(self, x):
         B, T, C = x.shape
@@ -42,6 +48,9 @@ class Head(nn.Module):
         # apply attention to value projection
         v = self.value(x) # (B, T, C)
         out = att @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        if log:
+            # write the attention matrix to the log file using pickle
+            pickle.dump({'batch_size': B, 'seq_length': T, 'head_size': C, 'att_matrix': att.cpu().numpy()}, self.log_file) # convert the tensor to numpy array and dump it as a dictionary
         return out
 
 # Parallel attention heads
@@ -154,7 +163,6 @@ class GPT(nn.Module):
             # note: using list [-1] to preserve the time dimension
             logits = self.ff(x[:, [-1], :]) # (B, T, V)
             loss = None
-            
         return logits, loss
     
     @torch.no_grad()
