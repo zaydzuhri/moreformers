@@ -7,7 +7,9 @@ from contextlib import nullcontext
 import torch
 import tiktoken
 import argparse
+import time
 from models.gpt import GPTConfig, GPT
+from models.gpt_modes import GPTModes
 from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
 from models.fadeformer_static import FadeFormerStatic
@@ -15,6 +17,7 @@ from models.fadeformer_stagger import FadeFormerStagger
 from models.fadeformer_half import FadeFormerHalf
 from models.fadeformer_pool import FadeFormerPool
 from models.fadeformer_trans import FadeFormerTrans
+from models.fadeformer_cut import FadeFormerCut
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -52,6 +55,8 @@ checkpoint = torch.load(ckpt_path, map_location=device)
 gptconf = GPTConfig(**checkpoint['model_args'])
 if model_type == 'gpt':
     model = GPT(gptconf)
+elif model_type == 'gpt-modes':
+    model = GPTModes(gptconf)
 elif model_type == 'fadeformer-linear':
     model = FadeFormerLinear(gptconf)
 elif model_type == 'fadeformer-rank':
@@ -66,6 +71,8 @@ elif model_type == 'fadeformer-pool':
     model = FadeFormerPool(gptconf)
 elif model_type == 'fadeformer-trans':
     model = FadeFormerTrans(gptconf)
+elif model_type == 'fadeformer-cut':
+    model = FadeFormerCut(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):
@@ -89,10 +96,15 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
-# run generation
+# run generation with timer
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
+            torch.cuda.synchronize()
+            t0 = time.time()
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
             print(decode(y[0].tolist()))
             print('--------------------------------------')
+            torch.cuda.synchronize()
+            print(f'Generation took {time.time()-t0:.02f}s for {max_new_tokens} tokens.')
+            print('======================================')

@@ -8,6 +8,7 @@ import json
 import math
 import numpy as np
 from models.gpt import GPTConfig, GPT
+from models.gpt_modes import GPTModes
 from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
 from models.fadeformer_static import FadeFormerStatic
@@ -15,6 +16,7 @@ from models.fadeformer_stagger import FadeFormerStagger
 from models.fadeformer_half import FadeFormerHalf
 from models.fadeformer_pool import FadeFormerPool
 from models.fadeformer_trans import FadeFormerTrans
+from models.fadeformer_cut import FadeFormerCut
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -92,7 +94,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
     x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
-    if model_type == 'gpt':
+    if model_type == 'gpt' or model_type == 'gpt-modes':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-linear':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
@@ -142,6 +144,8 @@ if init_from == 'scratch':
     gptconf = GPTConfig(**model_args)
     if model_type == 'gpt':
         model = GPT(gptconf)
+    elif model_type == 'gpt-modes':
+        model = GPTModes(gptconf)
     elif model_type == 'fadeformer-linear':
         model = FadeFormerLinear(gptconf)
     elif model_type == 'fadeformer-rank':
@@ -156,6 +160,8 @@ if init_from == 'scratch':
         model = FadeFormerPool(gptconf)
     elif model_type == 'fadeformer-trans':
         model = FadeFormerTrans(gptconf)
+    elif model_type == 'fadeformer-cut':
+        model = FadeFormerCut(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
