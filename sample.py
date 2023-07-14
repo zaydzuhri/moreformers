@@ -12,6 +12,9 @@ from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
 from models.fadeformer_static import FadeFormerStatic
 from models.fadeformer_stagger import FadeFormerStagger
+from models.fadeformer_half import FadeFormerHalf
+from models.fadeformer_pool import FadeFormerPool
+from models.fadeformer_trans import FadeFormerTrans
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -19,7 +22,7 @@ model_type = 'gpt'
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 1 # number of samples to draw
-max_new_tokens = 100 # number of tokens generated in each sample
+max_new_tokens = 1000 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 69
@@ -57,6 +60,12 @@ elif model_type == 'fadeformer-static':
     model = FadeFormerStatic(gptconf)
 elif model_type == 'fadeformer-stagger':
     model = FadeFormerStagger(gptconf)
+elif model_type == 'fadeformer-half':
+    model = FadeFormerHalf(gptconf)
+elif model_type == 'fadeformer-pool':
+    model = FadeFormerPool(gptconf)
+elif model_type == 'fadeformer-trans':
+    model = FadeFormerTrans(gptconf)
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):

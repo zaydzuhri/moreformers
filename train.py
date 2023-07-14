@@ -12,6 +12,9 @@ from models.fadeformer_linear import FadeFormerLinear
 from models.fadeformer_rank import FadeFormerRank
 from models.fadeformer_static import FadeFormerStatic
 from models.fadeformer_stagger import FadeFormerStagger
+from models.fadeformer_half import FadeFormerHalf
+from models.fadeformer_pool import FadeFormerPool
+from models.fadeformer_trans import FadeFormerTrans
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -96,12 +99,10 @@ def get_batch(split):
     elif model_type == 'fadeformer-rank':
         target_size = int(ctx_size // (2**n_layer))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
-    elif model_type == 'fadeformer-static':
+    else:
         target_size = int(ctx_size // (2**(n_layer-2)))
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
-    elif model_type == 'fadeformer-stagger':
-        target_size = int(ctx_size // (2**(n_layer-2)))
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
+
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -149,6 +150,12 @@ if init_from == 'scratch':
         model = FadeFormerStatic(gptconf)
     elif model_type == 'fadeformer-stagger':
         model = FadeFormerStagger(gptconf)
+    elif model_type == 'fadeformer-half':
+        model = FadeFormerHalf(gptconf)
+    elif model_type == 'fadeformer-pool':
+        model = FadeFormerPool(gptconf)
+    elif model_type == 'fadeformer-trans':
+        model = FadeFormerTrans(gptconf)
 # TODO: add support for loading from a checkpoint
 
 # print parameter count of model
@@ -200,8 +207,8 @@ def measure_perplexity():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in tqdm(range(eval_iters)):
+        losses = torch.zeros(eval_iters//10)
+        for k in range(eval_iters//10):
             X, Y = get_batch(split)
             with ctx:
                 # use a sliding window to compute log-likelihoods
@@ -212,11 +219,11 @@ def measure_perplexity():
                     input_ids = X[:, i:i+window_size]
                     labels = Y[:, i:i+window_size]
                     # get the model outputs
-                    outputs = model(input_ids, labels=labels)
+                    logits, loss = model(input_ids, labels)
                     # get the log probabilities of the target tokens
-                    log_probs[:, i:i+window_size] = outputs.logits.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+                    log_probs[:, i:i+window_size] = logits.gather(2, labels.unsqueeze(-1)).squeeze(-1)
                 # compute the average negative log-likelihood
-                loss = -log_probs[Y != -100].mean()
+                loss = -log_probs.mean()
             losses[k] = loss.item()
         # compute the perplexity as the exponentiation of the loss
         out[split] = torch.exp(losses).mean()

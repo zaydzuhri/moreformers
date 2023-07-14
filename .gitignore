@@ -3,3 +3,4 @@ out
 wandb
 models/__pycache__
 logs
+*sh
