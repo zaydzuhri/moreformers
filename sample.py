@@ -18,6 +18,7 @@ from models.fadeformer_half import FadeFormerHalf
 from models.fadeformer_pool import FadeFormerPool
 from models.fadeformer_trans import FadeFormerTrans
 from models.fadeformer_cut import FadeFormerCut
+from models.fadeformer_even import FadeFormerEven
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -73,6 +74,9 @@ elif model_type == 'fadeformer-trans':
     model = FadeFormerTrans(gptconf)
 elif model_type == 'fadeformer-cut':
     model = FadeFormerCut(gptconf)
+elif model_type == 'fadeformer-even':
+    model = FadeFormerEven(gptconf)
+
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
 for k,v in list(state_dict.items()):
