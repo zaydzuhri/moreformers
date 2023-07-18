@@ -34,18 +34,19 @@ class Head(nn.Module):
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
         self.dropout = nn.Dropout(config.dropout)
         if log:
-            self.log_file = open('logs/static_attention_log.pkl', 'wb') # open the file in write binary mode
+            self.log_file = open('logs/cut_attention_log.pkl', 'wb') # open the file in write binary mode
     
     def forward(self, x):
         B, T, C = x.shape
         # get max designed input length for next layer
-        t = self.ctx_size // (2**(self.layer+1))
+        t = self.ctx_size // (2**(self.layer))
         # get query and key projections
-        q = self.query(x) # (B, T, C)
         k = self.key(x) # (B, T, C)
         if self.fade:
             cut = min(T, t)
-            q = q[:, -cut:, :]
+            q = self.query(x[:, -cut:, :]) # (B, T, C)
+        else:
+            q = self.query(x)
         # compute attention "affinities", scale, mask, and softmax
         att = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
         att = att * C ** (-0.5)
@@ -116,15 +117,17 @@ class Block(nn.Module):
 
 # GPT Model
 class FadeFormerCut(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, pretrain=False):
         super().__init__()
         self.config = config
+        self.pretrain = pretrain
         self.tok_embd = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embd = nn.Embedding(config.ctx_size, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
-        self.pre_block = Block(config, fade=False)
-        self.blocks = nn.Sequential(*[Block(config, layer=i) for i in range(config.n_layer-2)])
-        self.post_block = Block(config, fade=False)
+        if pretrain:
+            self.blocks = nn.Sequential(*[Block(config, layer=i, fade=False) for i in range(config.n_layer)])
+        else:
+            self.blocks = nn.Sequential(*[Block(config, layer=i, fade=(False if (i==0 or i==config.n_layer-1) else True)) for i in range(config.n_layer)])
         self.ln = LayerNorm(config.n_embd, config.bias)
         self.ff = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # initialize weights
@@ -144,6 +147,8 @@ class FadeFormerCut(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     def forward(self, x, targets=None):
+        if self.pretrain:
+            x = x[:, -(self.config.ctx_size//(2**(self.config.n_layer-2))):]
         b, t = x.size()
         device = x.device
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # shape (1, t)
@@ -153,9 +158,7 @@ class FadeFormerCut(nn.Module):
         # add them up, apply dropout
         x = self.dropout(tok_embd + pos_embd) # (B, T, C)
         # apply transformer blocks then layer norm
-        x = self.pre_block(x) # (B, T, C)
         x = self.blocks(x) # (B, T, C)
-        x = self.post_block(x) # (B, T, C)
         x = self.ln(x) # (B, T, C)
 
         if targets is not None:
