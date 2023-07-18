@@ -39,18 +39,18 @@ class Head(nn.Module):
     def forward(self, x):
         B, T, C = x.shape
         # get query and key projections
-        q = self.query(x) # (B, T, C)
         k = self.key(x) # (B, T, C)
-        # compute attention "affinities", scale, mask, and softmax
-        att = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
-        att = att * C ** (-0.5)
-        if self.fade:
+        if self.fade and T > 1:
             # construct fading mask, odd stagger for odd head_num, even for even
             keep = [x for x in range(T) if x % 2 == 1]
             fade_tril = self.tril[keep, :T]
-            att = att[:, keep, :]
+            q = self.query(x[:, keep, :]) # (B, T, C)
         else:
             fade_tril = self.tril[:T, :T]
+            q = self.query(x) # (B, T, C)
+        # compute attention "affinities", scale, mask, and softmax
+        att = q @ k.transpose(-2, -1) # (B, T, C) @ (B, C, T) -> (B, T, T)
+        att = att * C ** (-0.5)
         att = att.masked_fill(fade_tril == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)

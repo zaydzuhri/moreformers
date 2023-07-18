@@ -43,6 +43,8 @@ gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 # model
 model_type = 'gpt' # 'gpt' or 'fadeformer'
 model_name = 'gpt2'
+new_model_name = 'fadeformer'
+pretrain = False
 ctx_size = 1024
 target_size = ctx_size # for fadeformer
 n_layer = 12
@@ -101,11 +103,10 @@ def get_batch(split):
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-rank':
         target_size = int(ctx_size // (2**n_layer))
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1+(ctx_size-target_size):i+1+ctx_size]).astype(np.int64)) for i in ix])
     else:
         target_size = int(ctx_size // (2**(n_layer-2)))
-        y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
-
+        y = torch.stack([torch.from_numpy((data[i+1+(ctx_size-target_size):i+1+ctx_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -162,10 +163,53 @@ if init_from == 'scratch':
     elif model_type == 'fadeformer-trans':
         model = FadeFormerTrans(gptconf)
     elif model_type == 'fadeformer-cut':
-        model = FadeFormerCut(gptconf)
+        if pretrain:
+            model = FadeFormerCut(gptconf, pretrain=True)
+        else:
+            model = FadeFormerCut(gptconf)
     elif model_type == 'fadeformer-even':
         model = FadeFormerEven(gptconf)
-# TODO: add support for loading from a checkpoint
+elif init_from == 'continue':
+    print('Continuing from checkpoint')
+    # init from a model saved in a specific directory
+    ckpt_path = os.path.join(out_dir, model_name+'.pt')
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+    gptconf = GPTConfig(**model_args)
+    if model_type == 'gpt':
+        model = GPT(gptconf)
+    elif model_type == 'gpt-modes':
+        model = GPTModes(gptconf)
+    elif model_type == 'fadeformer-linear':
+        model = FadeFormerLinear(gptconf)
+    elif model_type == 'fadeformer-rank':
+        model = FadeFormerRank(gptconf)
+    elif model_type == 'fadeformer-static':
+        model = FadeFormerStatic(gptconf)
+    elif model_type == 'fadeformer-stagger':
+        model = FadeFormerStagger(gptconf)
+    elif model_type == 'fadeformer-half':
+        model = FadeFormerHalf(gptconf)
+    elif model_type == 'fadeformer-pool':
+        model = FadeFormerPool(gptconf)
+    elif model_type == 'fadeformer-trans':
+        model = FadeFormerTrans(gptconf)
+    elif model_type == 'fadeformer-cut':
+        if pretrain:
+            model = FadeFormerCut(gptconf, pretrain=True)
+        else:
+            model = FadeFormerCut(gptconf)
+    elif model_type == 'fadeformer-even':
+        model = FadeFormerEven(gptconf)
+
+    state_dict = checkpoint['model']
+    unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
+    # iter_num = checkpoint['iter_num']
+    # best_val_loss = checkpoint['best_val_loss']
 
 # print parameter count of model
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -268,7 +312,7 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                 'lr': learning_rate
             })
         # save best
-        if losses['val'] < best_val_loss or always_save:
+        if losses['val'] < best_val_loss + (best_val_loss/1000) or always_save:
             best_val_loss = losses['val']
             if it > 0:
                 checkpoint = {
@@ -279,8 +323,8 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
-                pbar.set_description(f"Training | Loss: {losses['train']:.4f} | Saving to {out_dir}/{model_name}.pt")
-                torch.save(checkpoint, os.path.join(out_dir, model_name+'.pt'))
+                pbar.set_description(f"Training | Loss: {losses['train']:.4f} | Saving to {out_dir}/{(model_name if init_from == 'scratch' else new_model_name)}.pt")
+                torch.save(checkpoint, os.path.join(out_dir, (model_name if init_from == 'scratch' else new_model_name)+'.pt'))
     if it == 0 and eval_only:
         print("train/loss: ", losses['train'])
         print("val/loss: ", losses['val'])
@@ -320,4 +364,14 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
         lossf = loss.item() * gradient_accumulation_steps
         pbar.set_description(f"Training | Loss: {lossf:.5f}")
     
-    
+if not eval_only:
+    checkpoint = {
+        'model': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'model_args': model_args,
+        'iter_num': iter_num,
+        'best_val_loss': best_val_loss,
+        'config': config,
+    }
+    print(f"Saving latest iteration with loss: {losses['train']:.4f} | Saving to {out_dir}/{(model_name if init_from == 'scratch' else new_model_name)}-latest.pt")
+    torch.save(checkpoint, os.path.join(out_dir, (model_name if init_from == 'scratch' else new_model_name)+'-latest.pt'))
