@@ -18,6 +18,7 @@ from models.fadeformer_pool import FadeFormerPool
 from models.fadeformer_trans import FadeFormerTrans
 from models.fadeformer_cut import FadeFormerCut
 from models.fadeformer_even import FadeFormerEven
+from models.fadeformer_residual import FadeFormerResidual
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -97,7 +98,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
     x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
-    if model_type == 'gpt' or model_type == 'gpt-modes' or model_type == 'fadeformer-even':
+    if model_type == 'gpt' or model_type == 'gpt-modes' or model_type == 'fadeformer-even' or model_type == 'fadeformer-residual':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-linear':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
@@ -169,6 +170,8 @@ if init_from == 'scratch':
             model = FadeFormerCut(gptconf)
     elif model_type == 'fadeformer-even':
         model = FadeFormerEven(gptconf)
+    elif model_type == 'fadeformer-residual':
+        model = FadeFormerResidual(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory
@@ -250,6 +253,8 @@ def estimate_loss():
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
+            # if model_type == 'fadeformer-residual':
+            #     losses[k] = losses[k, -int(ctx_size // (2**n_layer)):]
         out[split] = losses.mean()
     model.train()
     return out
