@@ -69,7 +69,7 @@ min_lr = 6e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = False # change when in linux for pytorch 2.0
+compile = True # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -79,11 +79,17 @@ ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=d
 argparser = argparse.ArgumentParser()
 argparser.add_argument('--config', type=str, default=None, help='json file name in configs folder')
 args = argparser.parse_args()
+config = {}
 if args.config is not None:
     with open(os.path.join('configs', args.config+'.json'), 'r') as f:
         config = json.load(f)
     for k,v in config.items():
         globals()[k] = v
+else:
+    config = globals()
+if eval_only:
+    wandb_log = False
+    init_from = 'continue'
 #--------------------------------------------------------------------------------
 
 # Poor man's data loader
@@ -241,9 +247,9 @@ def get_lr(it):
     else:
         return lr
 
-# estimator for averaging loss over several batches and both splits
+# estimator for averaging loss and perplexity over several batches and both splits
 @torch.no_grad()
-def estimate_loss():
+def estimate_loss_perplexity():
     out = {}
     model.eval()
     for split in ['train', 'val']:
@@ -253,45 +259,14 @@ def estimate_loss():
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
-            # if model_type == 'fadeformer-residual':
-            #     losses[k] = losses[k, -int(ctx_size // (2**n_layer)):]
-        out[split] = losses.mean()
+        # compute the average loss and perplexity
+        out[split] = {'loss': losses.mean(), 'perplexity': torch.exp(losses).mean()}
     model.train()
     return out
-
-# function for measuring perplexity of transformer language models
-@torch.no_grad()
-def measure_perplexity():
-    out = {}
-    model.eval()
-    for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters//10)
-        for k in range(eval_iters//10):
-            X, Y = get_batch(split)
-            with ctx:
-                # use a sliding window to compute log-likelihoods
-                window_size = ctx_size # maximum context size of the model
-                log_probs = torch.zeros(Y.shape) # store log probabilities of each token
-                for i in range(0, Y.shape[1], window_size):
-                    # get the input and target segments
-                    input_ids = X[:, i:i+window_size]
-                    labels = Y[:, i:i+window_size]
-                    # get the model outputs
-                    logits, loss = model(input_ids, labels)
-                    # get the log probabilities of the target tokens
-                    log_probs[:, i:i+window_size] = logits.gather(2, labels.unsqueeze(-1)).squeeze(-1)
-                # compute the average negative log-likelihood
-                loss = -log_probs.mean()
-            losses[k] = loss.item()
-        # compute the perplexity as the exponentiation of the loss
-        out[split] = torch.exp(losses).mean()
-    model.train()
-    return out
-
 
 # logging
 if wandb_log:
-    wandb.init(project=wandb_project, name=wandb_run_name)
+    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
 X, Y = get_batch('train') # first batch
@@ -304,15 +279,16 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
 
     # eval
     if it % eval_interval == 0:
-        losses = estimate_loss()
-        # perplexities = measure_perplexity()
+        loss_ppl = estimate_loss_perplexity()
+        losses = {'train': loss_ppl['train']['loss'], 'val': loss_ppl['val']['loss']}
+        perplexities = {'train': loss_ppl['train']['perplexity'], 'val': loss_ppl['val']['perplexity']}
         pbar.set_description(f"Training | Loss: {losses['train']:.4f}")
         if wandb_log:
             wandb.log({
                 'train/loss': losses['train'], 
                 'val/loss': losses['val'], 
-                # 'train/perplexity': perplexities['train'],
-                # 'val/perplexity': perplexities['val'],
+                'train/perplexity': perplexities['train'],
+                'val/perplexity': perplexities['val'],
                 'iter': it,
                 'lr': learning_rate
             })
@@ -333,8 +309,8 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
     if it == 0 and eval_only:
         print("train/loss: ", losses['train'])
         print("val/loss: ", losses['val'])
-        # print("train/perplexity: ", perplexities['train'])
-        # print("val/perplexity: ", perplexities['val'])
+        print("train/perplexity: ", perplexities['train'])
+        print("val/perplexity: ", perplexities['val'])
         break
 
     # forward and backward pass with gradient accumulation
@@ -368,8 +344,13 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
         lossf = loss.item() * gradient_accumulation_steps
         pbar.set_description(f"Training | Loss: {lossf:.5f}")
+        # wandb.log({
+        #         'loss': lossf,
+        #         'iter': it,
+        #         'lr': learning_rate,
+        #     })
     
-if not eval_only:
+if not eval_only and not always_save:
     checkpoint = {
         'model': model.state_dict(),
         'optimizer': optimizer.state_dict(),
