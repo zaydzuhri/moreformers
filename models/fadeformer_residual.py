@@ -108,24 +108,26 @@ class Block(nn.Module):
     
     def forward(self, x):
         # layer norm, attention, layer norm, feedforward, and residuals
-        block_out = self.csa(self.ln1(x[:, -x.shape[1]//(2**(max(0, self.layer-1))):, :]))
-        lin_out = self.ff(self.ln2(x[:, -block_out.shape[1]:] + block_out))
-        out = torch.cat((x[:, :-lin_out.shape[1], :], x[:, -lin_out.shape[1]:] + lin_out), dim=1)
+        if self.fade:
+            block_out = self.csa(self.ln1(x[:, -x.shape[1]//(2**(max(0, self.layer-1))):, :]))
+            lin_out = self.ff(self.ln2(x[:, -block_out.shape[1]:] + block_out))
+            out = torch.cat((x[:, :-lin_out.shape[1], :], x[:, -lin_out.shape[1]:] + lin_out), dim=1)
+        else:
+            # layer norm, attention, residual
+            out = x + self.csa(self.ln1(x))
+            # layer norm, feedforward, residual
+            out = out + self.ff(self.ln2(out))
         return out
 
 # GPT Model
 class FadeFormerResidual(nn.Module):
-    def __init__(self, config, pretrain=False):
+    def __init__(self, config):
         super().__init__()
         self.config = config
-        self.pretrain = pretrain
         self.tok_embd = nn.Embedding(config.vocab_size, config.n_embd)
         self.pos_embd = nn.Embedding(config.ctx_size, config.n_embd)
         self.dropout = nn.Dropout(config.dropout)
-        if pretrain:
-            self.blocks = nn.Sequential(*[Block(config, layer=i, fade=False) for i in range(config.n_layer)])
-        else:
-            self.blocks = nn.Sequential(*[Block(config, layer=i, fade=(False if (i==0 or i==config.n_layer-1) else True)) for i in range(config.n_layer)])
+        self.blocks = nn.Sequential(*[Block(config, layer=i, fade=(False if (i==0 or i==config.n_layer-1) else True)) for i in range(config.n_layer)])
         self.ln = LayerNorm(config.n_embd, config.bias)
         self.ff = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
         # initialize weights
@@ -145,8 +147,6 @@ class FadeFormerResidual(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
     
     def forward(self, x, targets=None):
-        if self.pretrain:
-            x = x[:, -(self.config.ctx_size//(2**(self.config.n_layer-2))):]
         b, t = x.size()
         device = x.device
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # shape (1, t)

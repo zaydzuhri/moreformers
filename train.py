@@ -6,7 +6,9 @@ import wandb
 import argparse
 import json
 import math
+import glob
 import numpy as np
+from torch.profiler import tensorboard_trace_handler
 from models.gpt import GPTConfig, GPT
 from models.gpt_modes import GPTModes
 from models.fadeformer_linear import FadeFormerLinear
@@ -37,6 +39,7 @@ always_save = True # set to true to always save the model after evaluation
 wandb_log = True
 wandb_project = 'fadeformer'
 wandb_run_name = 'gpt2-testing'
+profile = False
 # data
 dataset = 'shakespeare'
 batch_size = 16
@@ -69,7 +72,7 @@ min_lr = 6e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = True # change when in linux for pytorch 2.0
+compile = False # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -97,6 +100,9 @@ data_dir = os.path.join('data', dataset)
 # Load data from prepared .bin files (see prepare.py in data folder)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+print(f"Dataset: {dataset}")
+print(f"train has {len(train_data):,} tokens")
+print(f"val has {len(val_data):,} tokens")
 # get_batch samples batches of blocks of tokens randomly from the data and returns x input and y target sequences
 def get_batch(split):
     data = train_data if split == 'train' else val_data
@@ -258,6 +264,9 @@ def estimate_loss_perplexity():
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
+            # target_size = int(ctx_size // (2**(n_layer-2)))
+            # # take only the last target_size tokens for evaluation
+            # loss = loss[:, -target_size:]
             losses[k] = loss.item()
         # compute the average loss and perplexity
         out[split] = {'loss': losses.mean(), 'perplexity': torch.exp(losses).mean()}
@@ -267,8 +276,17 @@ def estimate_loss_perplexity():
 # logging
 if wandb_log:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+if profile:
+    schedule = torch.profiler.schedule(
+        wait=2,
+        warmup=2,
+        active=6,
+        repeat=1)    
+    profiler = torch.profiler.profile(
+        schedule=schedule, on_trace_ready=tensorboard_trace_handler("wandb/latest-run/tbprofile"), with_stack=False)
 
 # training loop
+tokens_per_iter = batch_size * ctx_size * gradient_accumulation_steps
 X, Y = get_batch('train') # first batch
 t0 = time.time()
 for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
@@ -290,7 +308,8 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
                 'train/perplexity': perplexities['train'],
                 'val/perplexity': perplexities['val'],
                 'iter': it,
-                'lr': learning_rate
+                'lr': learning_rate,
+                'tokens': it * tokens_per_iter
             })
         # save best
         if losses['val'] < best_val_loss + (best_val_loss/1000) or always_save:
@@ -312,28 +331,30 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
         print("train/perplexity: ", perplexities['train'])
         print("val/perplexity: ", perplexities['val'])
         break
-
-    # forward and backward pass with gradient accumulation
-    for micro_step in range(gradient_accumulation_steps):
-        with ctx:
-            logits, loss = model(X, Y)
-            # scale loss for gradient accumulation
-            loss = loss / gradient_accumulation_steps
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        # each microstep adds scaled gradients to the optimizer's gradient buffers
-        scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-    # step the optimizer and scaler if training in fp16
-    # only after here are the gradients applied to the model
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    with profiler if profile else nullcontext():
+        # forward and backward pass with gradient accumulation
+        for micro_step in range(gradient_accumulation_steps):
+            with ctx:
+                logits, loss = model(X, Y)
+                # scale loss for gradient accumulation
+                loss = loss / gradient_accumulation_steps
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in fp16
+            # each microstep adds scaled gradients to the optimizer's gradient buffers
+            scaler.scale(loss).backward()
+        # clip the gradient
+        if grad_clip != 0.0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        # step the optimizer and scaler if training in fp16
+        # only after here are the gradients applied to the model
+        scaler.step(optimizer)
+        scaler.update()
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
+        if profile:
+            profiler.step()
 
     # timing and logging
     t1 = time.time()
@@ -349,6 +370,13 @@ for it in (pbar := tqdm(range(iter_num, max_iters), desc="Training")):
         #         'iter': it,
         #         'lr': learning_rate,
         #     })
+
+if profile:
+    print("Saving profile...")
+    profile_art = wandb.Artifact(f"trace-{wandb.run.id}", type="profile")
+    profile_art.add_file(sorted(glob.glob("wandb/latest-run/tbprofile/*.pt.trace.json"), key=os.path.getmtime)[-1], "trace.pt.trace.json")
+    # profile_art.save()
+    wandb.log_artifact(profile_art)
     
 if not eval_only and not always_save:
     checkpoint = {
