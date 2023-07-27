@@ -21,6 +21,12 @@ from models.fadeformer_trans import FadeFormerTrans
 from models.fadeformer_cut import FadeFormerCut
 from models.fadeformer_even import FadeFormerEven
 from models.fadeformer_residual import FadeFormerResidual
+from models.lessformer_qkk import LessFormerQKK
+from models.lessformer_mqa import LessFormerMQA
+from models.lessformer_share import LessFormerShare
+from models.lessformer_mqx import LessFormerMQX
+from models.lessformer_mqxk import LessFormerMQXK
+from models.moreformer import MoreFormer
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -72,7 +78,7 @@ min_lr = 6e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = False # change when in linux for pytorch 2.0
+compile = True # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -93,6 +99,8 @@ else:
 if eval_only:
     wandb_log = False
     init_from = 'continue'
+if profile:
+    compile = False
 #--------------------------------------------------------------------------------
 
 # Poor man's data loader
@@ -110,7 +118,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
     x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
-    if model_type == 'gpt' or model_type == 'gpt-modes' or model_type == 'fadeformer-even' or model_type == 'fadeformer-residual':
+    if 'gpt' in model_type or 'lessformer' in model_type or 'moreformer' in model_type or model_type == 'fadeformer-residual':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-linear':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
@@ -184,6 +192,18 @@ if init_from == 'scratch':
         model = FadeFormerEven(gptconf)
     elif model_type == 'fadeformer-residual':
         model = FadeFormerResidual(gptconf)
+    elif model_type == 'lessformer-qkk':
+        model = LessFormerQKK(gptconf)
+    elif model_type == 'lessformer-mqa':
+        model = LessFormerMQA(gptconf)
+    elif model_type == 'lessformer-share':
+        model = LessFormerShare(gptconf)
+    elif model_type == 'lessformer-mqx':
+        model = LessFormerMQX(gptconf)
+    elif model_type == 'lessformer-mqxk':
+        model = LessFormerMQXK(gptconf)
+    elif model_type == 'moreformer':
+        model = MoreFormer(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory

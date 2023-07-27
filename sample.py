@@ -20,13 +20,17 @@ from models.fadeformer_trans import FadeFormerTrans
 from models.fadeformer_cut import FadeFormerCut
 from models.fadeformer_even import FadeFormerEven
 from models.fadeformer_residual import FadeFormerResidual
+from models.lessformer_qkk import LessFormerQKK
+from models.lessformer_mqa import LessFormerMQA
+from models.lessformer_mqx import LessFormerMQX
+from models.lessformer_mqxk import LessFormerMQXK
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
 model_type = 'gpt'
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
+num_samples = 5 # number of samples to draw
 max_new_tokens = 1000 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
@@ -79,6 +83,14 @@ elif model_type == 'fadeformer-even':
     model = FadeFormerEven(gptconf)
 elif model_type == 'fadeformer-residual':
     model = FadeFormerResidual(gptconf)
+elif model_type == 'lessformer-qkk':
+    model = LessFormerQKK(gptconf)
+elif model_type == 'lessformer-mqa':
+    model = LessFormerMQA(gptconf)
+elif model_type == 'lessformer-mqx':
+    model = LessFormerMQX(gptconf)
+elif model_type == 'lessformer-mqxk':
+    model = LessFormerMQXK(gptconf)
 
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
@@ -106,6 +118,7 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
+times = []
 # run generation with timer
 with torch.no_grad():
     with ctx:
@@ -118,3 +131,6 @@ with torch.no_grad():
             torch.cuda.synchronize()
             print(f'Generation took {time.time()-t0:.02f}s for {max_new_tokens} tokens.')
             print('======================================')
+            times.append(time.time()-t0)
+
+print(f'Average generation time: {sum(times)/len(times):.02f}s for {max_new_tokens} tokens.')
