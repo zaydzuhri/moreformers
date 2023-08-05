@@ -24,6 +24,8 @@ from models.lessformer_qkk import LessFormerQKK
 from models.lessformer_mqa import LessFormerMQA
 from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
+from models.llama import LLaMA
+from models.lessllama import LessLLaMA
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -31,7 +33,7 @@ model_type = 'gpt'
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 5 # number of samples to draw
-max_new_tokens = 1000 # number of tokens generated in each sample
+max_new_tokens = 2000 # number of tokens generated in each sample
 temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 69
@@ -91,6 +93,10 @@ elif model_type == 'lessformer-mqx':
     model = LessFormerMQX(gptconf)
 elif model_type == 'lessformer-mqxk':
     model = LessFormerMQXK(gptconf)
+elif model_type == 'llama':
+    model = LLaMA(gptconf)
+elif model_type == 'lessllama':
+    model = LessLLaMA(gptconf)
 
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)

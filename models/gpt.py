@@ -112,6 +112,7 @@ class GPTConfig:
     dropout: float = 0.0
     # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     bias: bool = True
+    batch_size: int = 32
 
 # GPT Model
 class GPT(nn.Module):

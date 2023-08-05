@@ -27,6 +27,8 @@ from models.lessformer_share import LessFormerShare
 from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
 from models.moreformer import MoreFormer
+from models.llama import LLaMA
+from models.lessllama import LessLLaMA
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -78,7 +80,7 @@ min_lr = 6e-5
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
 dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
-compile = True # change when in linux for pytorch 2.0
+compile = False # change when in linux for pytorch 2.0
 # torch
 torch.manual_seed(69)
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -118,7 +120,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - ctx_size, (batch_size,))
     # x is the input sequence, y is the target sequence which is x shifted by 1
     x = torch.stack([torch.from_numpy((data[i:i+ctx_size]).astype(np.int64)) for i in ix])
-    if 'gpt' in model_type or 'lessformer' in model_type or 'moreformer' in model_type or model_type == 'fadeformer-residual':
+    if 'gpt' in model_type or 'llama' in model_type or 'lessformer' in model_type or 'moreformer' in model_type or model_type == 'fadeformer-residual':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     elif model_type == 'fadeformer-linear':
         y = torch.stack([torch.from_numpy((data[i+1:i+1+target_size]).astype(np.int64)) for i in ix])
@@ -143,7 +145,8 @@ model_args = dict(
     ctx_size=ctx_size,
     bias=bias, 
     vocab_size=None, 
-    dropout=dropout
+    dropout=dropout,
+    batch_size=batch_size,
 ) # start with model_args from globals
 
 # attempt to derive vocab_size from the dataset
@@ -204,6 +207,10 @@ if init_from == 'scratch':
         model = LessFormerMQXK(gptconf)
     elif model_type == 'moreformer':
         model = MoreFormer(gptconf)
+    elif model_type == 'llama':
+        model = LLaMA(gptconf)
+    elif model_type == 'lessllama':
+        model = LessLLaMA(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory
@@ -295,6 +302,7 @@ def estimate_loss_perplexity():
 
 # logging
 if wandb_log:
+    config['n_params'] = num_params
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 if profile:
     schedule = torch.profiler.schedule(
