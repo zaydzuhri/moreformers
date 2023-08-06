@@ -28,7 +28,13 @@ from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
 from models.moreformer import MoreFormer
 from models.llama import LLaMA
+from models.llama_mqa import LLaMAMQA
 from models.lessllama import LessLLaMA
+from models.nonellama import NoneLLaMA
+from models.weightllama import WeightLLaMA
+from models.buffllama import BuffLLaMA
+from models.sumllama import SumLLaMA
+from models.doublellama import DoubleLLaMA
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -209,8 +215,20 @@ if init_from == 'scratch':
         model = MoreFormer(gptconf)
     elif model_type == 'llama':
         model = LLaMA(gptconf)
+    elif model_type == 'llama-mqa':
+        model = LLaMAMQA(gptconf)
     elif model_type == 'lessllama':
         model = LessLLaMA(gptconf)
+    elif model_type == 'nonellama':
+        model = NoneLLaMA(gptconf)
+    elif model_type == 'weightllama':
+        model = WeightLLaMA(gptconf)
+    elif model_type == 'buffllama':
+        model = BuffLLaMA(gptconf)
+    elif model_type == 'sumllama':
+        model = SumLLaMA(gptconf)
+    elif model_type == 'doublellama':
+        model = DoubleLLaMA(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory
