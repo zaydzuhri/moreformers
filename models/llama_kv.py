@@ -45,8 +45,8 @@ class Attention(nn.Module):
         self.key = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.out = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.sum = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.com = nn.Linear(config.n_embd * 2, config.n_embd, bias=config.bias)
+        self.register_buffer('cache_k', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
+        self.register_buffer('cache_v', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
 
     def forward(self, x, freqs_cis, is_training):
@@ -54,22 +54,34 @@ class Attention(nn.Module):
 
         q = self.query(x) # (B, T, C)
         q = q.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
-
-        k = self.key(x) # (B, T, C)
-        k = k.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
-
-        s = self.sum(x) # (B, T, C)
-        # summary is just an average of s over all timesteps
-        # use tril to mask out future tokens
-        tril = self.tril[:T, :T].masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        tril = F.softmax(tril, dim=-1)
-        summary = tril @ s # (T, T) @ (B, T, C) -> (B, T, C)
-
-        v = self.value(x) # (B, T, C)
-        # concat value and summary (along the embed dim), then project back using com
-        v = torch.cat((v, summary), dim=-1) # (B, T, 2C)
-        v = self.com(v) # (B, T, C)
-        v = v.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
+        # k = self.key(x)
+        # k = k.view(B, T, self.n_head, self.head_size)
+        # v = self.value(x)
+        # v = v.view(B, T, self.n_head, self.head_size)
+        # for k and v, only update the cache for new tokens.
+        # shift the cache along the time axis if full when inferencing
+        # no need for cache when training
+        if is_training:
+            k = self.key(x)
+            k = k.view(B, T, self.n_head, self.head_size)
+            v = self.value(x)
+            v = v.view(B, T, self.n_head, self.head_size)
+        else:
+            new_k = self.key(x[:, -1:, :])
+            new_k = new_k.view(B, 1, self.n_head, self.head_size)
+            new_v = self.value(x[:, -1:, :])
+            new_v = new_v.view(B, 1, self.n_head, self.head_size)
+            # if cache is full, shift it along the time axis
+            # cache is full if last timestep is not 0
+            if T == self.ctx_size:
+                self.cache_k = torch.cat([self.cache_k[:B, 1:, :, :], new_k], dim=1)
+                self.cache_v = torch.cat([self.cache_v[:B, 1:, :, :], new_v], dim=1)
+            else:
+                # set cache at timestep T to new_k and new_v
+                self.cache_k[:B, T-1, :, :] = new_k[:, 0, :, :]
+                self.cache_v[:B, T-1, :, :] = new_v[:, 0, :, :]
+            k = self.cache_k[:B, :T, :, :]
+            v = self.cache_v[:B, :T, :, :]
 
         # apply rotary embeddings
         q, k = apply_rotary_emb(q, k, freqs_cis)
@@ -94,7 +106,7 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden_size = config.n_embd * 3
+        hidden_size = config.n_embd * 4
         self.lin1 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
         self.lin2 = nn.Linear(hidden_size, config.n_embd, bias=config.bias)
         self.lin3 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
@@ -117,7 +129,7 @@ class Block(nn.Module):
         return out
 
 # LLaMA model
-class SumLLaMA(nn.Module):
+class LLaMAKV(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config

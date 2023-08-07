@@ -35,6 +35,8 @@ from models.weightllama import WeightLLaMA
 from models.buffllama import BuffLLaMA
 from models.sumllama import SumLLaMA
 from models.doublellama import DoubleLLaMA
+from models.localllama import LocalLLaMA
+from models.fadellama import FadeLLaMA
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -229,6 +231,10 @@ if init_from == 'scratch':
         model = SumLLaMA(gptconf)
     elif model_type == 'doublellama':
         model = DoubleLLaMA(gptconf)
+    elif model_type == 'localllama':
+        model = LocalLLaMA(gptconf)
+    elif model_type == 'fadellama':
+        model = FadeLLaMA(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory

@@ -45,32 +45,20 @@ class Attention(nn.Module):
         self.key = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.value = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.out = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.sum = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.com = nn.Linear(config.n_embd * 2, config.n_embd, bias=config.bias)
+        self.register_buffer('cache_k', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
+        self.register_buffer('cache_v', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
 
-    def forward(self, x, freqs_cis, is_training):
+    def forward(self, x, freqs_cis):
         B, T, C = x.shape
 
         q = self.query(x) # (B, T, C)
         q = q.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
-
-        k = self.key(x) # (B, T, C)
-        k = k.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
-
-        s = self.sum(x) # (B, T, C)
-        # summary is just an average of s over all timesteps
-        # use tril to mask out future tokens
-        tril = self.tril[:T, :T].masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        tril = F.softmax(tril, dim=-1)
-        summary = tril @ s # (T, T) @ (B, T, C) -> (B, T, C)
-
-        v = self.value(x) # (B, T, C)
-        # concat value and summary (along the embed dim), then project back using com
-        v = torch.cat((v, summary), dim=-1) # (B, T, 2C)
-        v = self.com(v) # (B, T, C)
-        v = v.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
-
+        k = self.key(x)
+        k = k.view(B, T, self.n_head, self.head_size)
+        v = self.value(x)
+        v = v.view(B, T, self.n_head, self.head_size)
+        
         # apply rotary embeddings
         q, k = apply_rotary_emb(q, k, freqs_cis)
 
@@ -94,7 +82,7 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden_size = config.n_embd * 3
+        hidden_size = config.n_embd * 4
         self.lin1 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
         self.lin2 = nn.Linear(hidden_size, config.n_embd, bias=config.bias)
         self.lin3 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
@@ -104,26 +92,40 @@ class FeedForward(nn.Module):
 
 # Transformer block
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num, fade):
         super().__init__()
+        self.fade = fade
+        self.layer_num = layer_num
+        self.ctx_size = config.ctx_size
         self.attn = Attention(config)
         self.norm1 = RMSNorm(config.n_embd)
         self.ff = FeedForward(config)
         self.norm2 = RMSNorm(config.n_embd)
     
-    def forward(self, x, freqs_cis, is_training):
-        out = x + self.attn(self.norm1(x), freqs_cis, is_training)
+    def forward(self, x, freqs_cis):
+        if self.fade:
+            # T_fade is the designed fade length
+            T_fade = int(self.ctx_size // (2**self.layer_num))
+            x_og = x
+            x = x[:, -T_fade:, :]
+            freqs_cis = freqs_cis[-T_fade:, :]
+
+        out = x + self.attn(self.norm1(x), freqs_cis)
         out = out + self.ff(self.norm2(out))
+
+        if self.fade:
+            # restore x
+            out = torch.cat((x_og[:, :-T_fade, :], out), dim=1)
         return out
 
 # LLaMA model
-class SumLLaMA(nn.Module):
+class FadeLLaMA(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.freqs_cis = precompute_freqs_cis(config.n_embd // config.n_head, config.ctx_size * 2)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, n, (n != 0 and n != config.n_layer-1)) for n in range(config.n_layer)])
         self.norm = RMSNorm(config.n_embd)
         self.lin = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
     
@@ -133,7 +135,7 @@ class SumLLaMA(nn.Module):
         x = self.tok_emb(x) # (B, T, C)
         freqs_cis = self.freqs_cis[:T] # (T, T, 2)
         for block in self.blocks:
-            x = block(x, freqs_cis, is_training)
+            x = block(x, freqs_cis)
         x = self.norm(x)
 
         if is_training:

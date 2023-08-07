@@ -47,7 +47,15 @@ class Attention(nn.Module):
         self.out = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.sum = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.com = nn.Linear(config.n_embd * 2, config.n_embd, bias=config.bias)
-        self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
+        tril = torch.tril(torch.ones(config.ctx_size, config.ctx_size))
+        self.register_buffer('tril', tril)
+        # we want to make local attention mask, so we want to subtract a left-shifted triangular matrix from a normal triangular matrix
+        loc_size = 4
+        loc_shift = torch.tril(torch.ones(config.ctx_size, config.ctx_size), diagonal=-loc_size)
+        loc = tril - loc_shift
+        loc = loc.masked_fill(loc == 0, float('-inf'))
+        loc = F.softmax(loc, dim=-1)
+        self.register_buffer('loc', loc)
 
     def forward(self, x, freqs_cis, is_training):
         B, T, C = x.shape
@@ -59,11 +67,10 @@ class Attention(nn.Module):
         k = k.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
 
         s = self.sum(x) # (B, T, C)
-        # summary is just an average of s over all timesteps
-        # use tril to mask out future tokens
-        tril = self.tril[:T, :T].masked_fill(self.tril[:T, :T] == 0, float('-inf'))
-        tril = F.softmax(tril, dim=-1)
-        summary = tril @ s # (T, T) @ (B, T, C) -> (B, T, C)
+        # summary is just an average of s over local timesteps
+        # use loc to mask out future tokens
+        loc = self.loc[:T, :T]
+        summary = loc @ s # (T, T) @ (B, T, C) -> (B, T, C)
 
         v = self.value(x) # (B, T, C)
         # concat value and summary (along the embed dim), then project back using com
@@ -117,7 +124,7 @@ class Block(nn.Module):
         return out
 
 # LLaMA model
-class SumLLaMA(nn.Module):
+class LocalLLaMA(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
