@@ -8,8 +8,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import pickle
 
-log_mode = 0 # 0: no log, 1: log attention matrix, 2: log block activations
-
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
@@ -51,7 +49,7 @@ class Attention(nn.Module):
         self.register_buffer('cache_v', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
 
-    def forward(self, x, freqs_cis, is_training):
+    def forward(self, x, freqs_cis):
         B, T, C = x.shape
 
         q = self.query(x) # (B, T, C)
@@ -94,44 +92,50 @@ class FeedForward(nn.Module):
 
 # Transformer block
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num):
         super().__init__()
+        # T_fade is the designed fade length
+        n_unfaded = 2
+        self.T_fade = int(config.ctx_size // (2**min(layer_num, config.n_layer-n_unfaded-1)))
+        print(f'Layer {layer_num} fade length: {self.T_fade} tokens')
+        self.ctx_size = config.ctx_size
         self.attn = Attention(config)
         self.norm1 = RMSNorm(config.n_embd)
         self.ff = FeedForward(config)
         self.norm2 = RMSNorm(config.n_embd)
     
     def forward(self, x, freqs_cis, is_training):
-        out = x + self.attn(self.norm1(x), freqs_cis, is_training)
+        x_og = x
+        x = x[:, -self.T_fade:, :]
+            
+        freqs_cis = freqs_cis[-x.shape[1]:, :]
+
+        out = x + self.attn(self.norm1(x), freqs_cis)
         out = out + self.ff(self.norm2(out))
+
+        # restore x
+        if is_training:
+            out = torch.cat((x_og[:, :-self.T_fade, :], out), dim=1)
         return out
 
 # LLaMA model
-class LLaMA(nn.Module):
+class FadeLLaMAPost(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.freqs_cis = precompute_freqs_cis(config.n_embd // config.n_head, config.ctx_size * 2)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, n) for n in range(config.n_layer)])
         self.norm = RMSNorm(config.n_embd)
         self.lin = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
-        # if log_mode == 2:
-        #     # create a file to log activations
-        #     self.log_file = open('logs/llama_log.pkl', 'wb') # open the file in write binary mode
     
     def forward(self, x, targets=None):
         is_training = targets is not None
         B, T = x.shape
         x = self.tok_emb(x) # (B, T, C)
         freqs_cis = self.freqs_cis[:T] # (T, T, 2)
-        # i = 0
         for block in self.blocks:
             x = block(x, freqs_cis, is_training)
-            # if log_mode == 2 and not is_training:
-            #     # write the activations to the log file using pickle
-            #     pickle.dump({'layer': i, 'block_activations': x.cpu().numpy()}, self.log_file)
-            #     i += 1
         x = self.norm(x)
 
         if is_training:

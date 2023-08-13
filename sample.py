@@ -34,6 +34,12 @@ from models.sumllama import SumLLaMA
 from models.doublellama import DoubleLLaMA
 from models.localllama import LocalLLaMA
 from models.fadellama import FadeLLaMA
+from models.fadellama_sum import FadeLLaMASum
+from models.fadellama_invert import FadeLLaMAInvert
+from models.fadellama_post import FadeLLaMAPost
+from models.fadellama_v import FadeLLaMAV
+from models.fadellama_ff import FadeLLaMAFF
+from models.fadellama_attff import FadeLLaMAAttFF
 
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
@@ -121,6 +127,18 @@ elif model_type == 'localllama':
     model = LocalLLaMA(gptconf)
 elif model_type == 'fadellama':
     model = FadeLLaMA(gptconf)
+elif model_type == 'fadellama-sum':
+    model = FadeLLaMASum(gptconf)
+elif model_type == 'fadellama-invert':
+    model = FadeLLaMAInvert(gptconf)
+elif model_type == 'fadellama-post':
+    model = FadeLLaMAPost(gptconf)
+elif model_type == 'fadellama-v':
+    model = FadeLLaMAV(gptconf)
+elif model_type == 'fadellama-ff':
+    model = FadeLLaMAFF(gptconf)
+elif model_type == 'fadellama-attff':
+    model = FadeLLaMAAttFF(gptconf)
 
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
@@ -148,19 +166,24 @@ if start.startswith('FILE:'):
 start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
+
+# time generation with pytorch cuda events
+start_event = torch.cuda.Event(enable_timing=True)
+end_event = torch.cuda.Event(enable_timing=True)
 times = []
 # run generation with timer
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             torch.cuda.synchronize()
-            t0 = time.time()
+            start_event.record()
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            end_event.record()
+            torch.cuda.synchronize()
+            times.append(start_event.elapsed_time(end_event)/1000)
             print(decode(y[0].tolist()))
             print('--------------------------------------')
-            torch.cuda.synchronize()
-            print(f'Generation took {time.time()-t0:.02f}s for {max_new_tokens} tokens.')
+            print(f'Generation time: {times[-1]:.02f}s for {max_new_tokens} tokens.')
             print('======================================')
-            times.append(time.time()-t0)
 
-print(f'Average generation time: {sum(times)/len(times):.02f}s for {max_new_tokens} tokens.')
+print(f'Average generation time: {(sum(times)/len(times)):.02f}s for {max_new_tokens} tokens.')

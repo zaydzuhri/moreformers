@@ -8,8 +8,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import pickle
 
-log_mode = 0 # 0: no log, 1: log attention matrix, 2: log block activations
-
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
@@ -27,19 +25,20 @@ def precompute_freqs_cis(dim, end, theta=10000.0):
     freqs_cis = torch.polar(torch.ones_like(freqs).float(), freqs.float())  # complex64
     return freqs_cis
 
-def apply_rotary_emb(xq, xk, freqs_cis):
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    shape = [d if i == 1 or i == xq_.ndim - 1 else 1 for i, d in enumerate(xq_.shape)]
-    freqs_cis = freqs_cis.view(*shape).to(xq_.device)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out, xk_out
+def apply_rotary_emb(x, freqs_cis):
+    freqs_cis = freqs_cis[-x.shape[1]:, :]
+    x_ = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+    shape = [d if i == 1 or i == x_.ndim - 1 else 1 for i, d in enumerate(x_.shape)]
+    freqs_cis = freqs_cis.view(*shape).to(x_.device)
+    x_out = torch.view_as_real(x_ * freqs_cis).flatten(3)
+    return x_out
 
 # Multi-head attention with KV cache
 class Attention(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, fade, T_fade):
         super().__init__()
+        self.fade = fade
+        self.T_fade = T_fade
         self.ctx_size = config.ctx_size
         self.n_head = config.n_head
         self.head_size = config.n_embd // config.n_head
@@ -51,18 +50,20 @@ class Attention(nn.Module):
         self.register_buffer('cache_v', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
 
-    def forward(self, x, freqs_cis, is_training):
+    def forward(self, x, freqs_cis):
         B, T, C = x.shape
+        T_q = self.T_fade if self.fade else T
 
-        q = self.query(x) # (B, T, C)
-        q = q.view(B, T, self.n_head, self.head_size) # (B, T, H, C/H)
+        q = self.query(x[:, -T_q:, :]) # (B, T, C)
+        q = q.view(B, T_q, self.n_head, self.head_size) # (B, T, H, C/H)
         k = self.key(x)
         k = k.view(B, T, self.n_head, self.head_size)
         v = self.value(x)
         v = v.view(B, T, self.n_head, self.head_size)
         
         # apply rotary embeddings
-        q, k = apply_rotary_emb(q, k, freqs_cis)
+        q = apply_rotary_emb(q, freqs_cis)
+        k = apply_rotary_emb(k, freqs_cis)
 
         # compute attention "affinities", scale, mask, and softmax
         q = q.transpose(1, 2) # (B, H, T, C/H)
@@ -70,7 +71,7 @@ class Attention(nn.Module):
         v = v.transpose(1, 2) # (B, H, T, C/H)
         att = q @ k.transpose(2, 3) # (B, H, T, C/H) @ (B, H, C/H, T) -> (B, H, T, T)
         att = att / math.sqrt(self.head_size) # scale
-        att = att.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # mask
+        att = att.masked_fill(self.tril[-T_q:, -T:] == 0, float('-inf')) # mask
         att = F.softmax(att, dim=-1) # softmax
 
         # apply attention to value projection, concat heads, and project
@@ -94,44 +95,51 @@ class FeedForward(nn.Module):
 
 # Transformer block
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num, fade):
         super().__init__()
-        self.attn = Attention(config)
+        self.fade = fade
+        self.T_fade = int(config.ctx_size // (2**layer_num))
+        # print(f'Block {layer_num} fade: {fade} fade length: {self.T_fade if fade else None} tokens')
+        self.attn = Attention(config, fade, self.T_fade)
         self.norm1 = RMSNorm(config.n_embd)
         self.ff = FeedForward(config)
         self.norm2 = RMSNorm(config.n_embd)
     
     def forward(self, x, freqs_cis, is_training):
-        out = x + self.attn(self.norm1(x), freqs_cis, is_training)
+        if self.fade:
+            out_og = x
+
+        freqs_cis = freqs_cis[-x.shape[1]:, :]
+        out = self.attn(self.norm1(x), freqs_cis)
+        out = x[:, -out.shape[1]:, :] + out
         out = out + self.ff(self.norm2(out))
+
+        if self.fade and is_training:
+            # restore x
+            out = torch.cat((out_og[:, :-self.T_fade, :], out), dim=1)
         return out
 
 # LLaMA model
-class LLaMA(nn.Module):
+class FadeLLaMAAttFF(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.freqs_cis = precompute_freqs_cis(config.n_embd // config.n_head, config.ctx_size * 2)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        post_n = 6
+        print(f'post_n: {post_n} fade to: {config.ctx_size // (2**(config.n_layer-post_n-1))} tokens')
+        self.blocks = nn.ModuleList([Block(config, n, (n not in [config.n_layer-i for i in range(1, post_n+1)])) for n in range(config.n_layer)])
+        # self.blocks = nn.ModuleList([Block(config, n, (n != 0 and n != config.n_layer-1)) for n in range(config.n_layer)])
         self.norm = RMSNorm(config.n_embd)
         self.lin = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
-        # if log_mode == 2:
-        #     # create a file to log activations
-        #     self.log_file = open('logs/llama_log.pkl', 'wb') # open the file in write binary mode
     
     def forward(self, x, targets=None):
         is_training = targets is not None
         B, T = x.shape
         x = self.tok_emb(x) # (B, T, C)
         freqs_cis = self.freqs_cis[:T] # (T, T, 2)
-        # i = 0
         for block in self.blocks:
             x = block(x, freqs_cis, is_training)
-            # if log_mode == 2 and not is_training:
-            #     # write the activations to the log file using pickle
-            #     pickle.dump({'layer': i, 'block_activations': x.cpu().numpy()}, self.log_file)
-            #     i += 1
         x = self.norm(x)
 
         if is_training:

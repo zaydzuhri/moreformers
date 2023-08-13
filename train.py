@@ -37,6 +37,12 @@ from models.sumllama import SumLLaMA
 from models.doublellama import DoubleLLaMA
 from models.localllama import LocalLLaMA
 from models.fadellama import FadeLLaMA
+from models.fadellama_sum import FadeLLaMASum
+from models.fadellama_invert import FadeLLaMAInvert
+from models.fadellama_post import FadeLLaMAPost
+from models.fadellama_v import FadeLLaMAV
+from models.fadellama_m import FadeLLaMAM
+from models.fadellama_ff import FadeLLaMAFF
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -235,6 +241,18 @@ if init_from == 'scratch':
         model = LocalLLaMA(gptconf)
     elif model_type == 'fadellama':
         model = FadeLLaMA(gptconf)
+    elif model_type == 'fadellama-sum':
+        model = FadeLLaMASum(gptconf)
+    elif model_type == 'fadellama-invert':
+        model = FadeLLaMAInvert(gptconf)
+    elif model_type == 'fadellama-post':
+        model = FadeLLaMAPost(gptconf)
+    elif model_type == 'fadellama-v':
+        model = FadeLLaMAV(gptconf)
+    elif model_type == 'fadellama-m':
+        model = FadeLLaMAM(gptconf)
+    elif model_type == 'fadellama-ff':
+        model = FadeLLaMAFF(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory

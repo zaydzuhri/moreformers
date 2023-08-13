@@ -8,8 +8,6 @@ import torch.nn as nn
 from torch.nn import functional as F
 import pickle
 
-log_mode = 0 # 0: no log, 1: log attention matrix, 2: log block activations
-
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
@@ -51,7 +49,7 @@ class Attention(nn.Module):
         self.register_buffer('cache_v', torch.zeros((config.batch_size, config.ctx_size, config.n_head, self.head_size)))
         self.register_buffer('tril', torch.tril(torch.ones(config.ctx_size, config.ctx_size)))
 
-    def forward(self, x, freqs_cis, is_training):
+    def forward(self, x, freqs_cis):
         B, T, C = x.shape
 
         q = self.query(x) # (B, T, C)
@@ -84,7 +82,7 @@ class Attention(nn.Module):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hidden_size = config.n_embd * 4
+        hidden_size = (config.n_embd * 4)
         self.lin1 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
         self.lin2 = nn.Linear(hidden_size, config.n_embd, bias=config.bias)
         self.lin3 = nn.Linear(config.n_embd, hidden_size, bias=config.bias)
@@ -94,44 +92,57 @@ class FeedForward(nn.Module):
 
 # Transformer block
 class Block(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_num, fade):
         super().__init__()
+        self.fade = fade
+        self.layer_num = layer_num
+        self.ctx_size = config.ctx_size
         self.attn = Attention(config)
         self.norm1 = RMSNorm(config.n_embd)
         self.ff = FeedForward(config)
         self.norm2 = RMSNorm(config.n_embd)
+        self.sum = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
     
-    def forward(self, x, freqs_cis, is_training):
-        out = x + self.attn(self.norm1(x), freqs_cis, is_training)
+    def forward(self, x, freqs_cis):
+        B, T, C = x.shape
+        if self.fade:
+            # T_fade is the designed fade length
+            T_fade = int(self.ctx_size // (2**self.layer_num))
+            x_og = x
+            # we do a no projection summary on half of x
+            summary = self.sum(x)
+            stril = self.attn.tril[-min(T_fade, T):, -T:].masked_fill(self.attn.tril[-min(T_fade, T):, -T:] == 0, float('-inf'))
+            stril = F.softmax(stril, dim=-1)
+            xs = stril @ summary # (B, T/2, T) @ (B, T, C) -> (B, T/2, C)
+            x = (x[:, -T_fade:, :] + xs) / 2
+            freqs_cis = freqs_cis[-T_fade:, :]
+
+        out = x + self.attn(self.norm1(x), freqs_cis)
         out = out + self.ff(self.norm2(out))
+
+        if self.fade:
+            # restore x
+            out = torch.cat((x_og[:, :-T_fade, :], out), dim=1)
         return out
 
 # LLaMA model
-class LLaMA(nn.Module):
+class FadeLLaMASum(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.freqs_cis = precompute_freqs_cis(config.n_embd // config.n_head, config.ctx_size * 2)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, n, (n != 0 and n != config.n_layer-1)) for n in range(config.n_layer)])
         self.norm = RMSNorm(config.n_embd)
         self.lin = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
-        # if log_mode == 2:
-        #     # create a file to log activations
-        #     self.log_file = open('logs/llama_log.pkl', 'wb') # open the file in write binary mode
     
     def forward(self, x, targets=None):
         is_training = targets is not None
         B, T = x.shape
         x = self.tok_emb(x) # (B, T, C)
         freqs_cis = self.freqs_cis[:T] # (T, T, 2)
-        # i = 0
         for block in self.blocks:
-            x = block(x, freqs_cis, is_training)
-            # if log_mode == 2 and not is_training:
-            #     # write the activations to the log file using pickle
-            #     pickle.dump({'layer': i, 'block_activations': x.cpu().numpy()}, self.log_file)
-            #     i += 1
+            x = block(x, freqs_cis)
         x = self.norm(x)
 
         if is_training:
