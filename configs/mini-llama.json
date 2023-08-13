@@ -8,7 +8,7 @@
     "always_save": true,
     "wandb_log": true,
     "wandb_project": "fadeformer",
-    "wandb_run_name": "mini-llama",
+    "wandb_run_name": "mini-llama ",
     "dataset": "shakespeare",
     "batch_size": 16,
     "gradient_accumulation_steps": 1,
