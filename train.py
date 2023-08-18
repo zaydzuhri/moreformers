@@ -43,6 +43,7 @@ from models.fadellama_post import FadeLLaMAPost
 from models.fadellama_v import FadeLLaMAV
 from models.fadellama_m import FadeLLaMAM
 from models.fadellama_ff import FadeLLaMAFF
+from models.fadellama_attff import FadeLLaMAAttFF
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -253,6 +254,8 @@ if init_from == 'scratch':
         model = FadeLLaMAM(gptconf)
     elif model_type == 'fadellama-ff':
         model = FadeLLaMAFF(gptconf)
+    elif model_type == 'fadellama-attff':
+        model = FadeLLaMAAttFF(gptconf)
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory

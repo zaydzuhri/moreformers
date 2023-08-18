@@ -9,6 +9,9 @@ from torch.nn import functional as F
 import pickle
 
 log_mode = 0 # 0: no log, 1: log attention matrix, 2: log block activations
+if log_mode == 1:
+    # create a file to log the attention matrix
+    log_file = open('logs/attention_log.pkl', 'wb') # open the file in write binary mode
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim, eps=1e-6):
@@ -72,6 +75,9 @@ class Attention(nn.Module):
         att = att / math.sqrt(self.head_size) # scale
         att = att.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # mask
         att = F.softmax(att, dim=-1) # softmax
+        if log_mode == 1 and not is_training:
+            # write the attention matrix to the log file using pickle
+            pickle.dump({'batch_size': B, 'seq_length': T, 'head_size': C, 'att_matrix': att.cpu().numpy()}, log_file) # convert the tensor to numpy array and dump it as a dictionary
 
         # apply attention to value projection, concat heads, and project
         out = att @ v # (B, H, T, T) @ (B, H, T, C/H) -> (B, H, T, C/H)

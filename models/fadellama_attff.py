@@ -52,7 +52,7 @@ class Attention(nn.Module):
 
     def forward(self, x, freqs_cis):
         B, T, C = x.shape
-        T_q = self.T_fade if self.fade else T
+        T_q = min(self.T_fade, T) if self.fade else T
 
         q = self.query(x[:, -T_q:, :]) # (B, T, C)
         q = q.view(B, T_q, self.n_head, self.head_size) # (B, T, H, C/H)
@@ -126,7 +126,7 @@ class FadeLLaMAAttFF(nn.Module):
         self.config = config
         self.tok_emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.freqs_cis = precompute_freqs_cis(config.n_embd // config.n_head, config.ctx_size * 2)
-        post_n = 6
+        post_n = 4
         print(f'post_n: {post_n} fade to: {config.ctx_size // (2**(config.n_layer-post_n-1))} tokens')
         self.blocks = nn.ModuleList([Block(config, n, (n not in [config.n_layer-i for i in range(1, post_n+1)])) for n in range(config.n_layer)])
         # self.blocks = nn.ModuleList([Block(config, n, (n != 0 and n != config.n_layer-1)) for n in range(config.n_layer)])
