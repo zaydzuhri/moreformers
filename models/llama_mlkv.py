@@ -120,15 +120,13 @@ class Attention(nn.Module):
         )
 
         if has_kv:
-            self.wk = torch.nn.Linear(
+            self.wk = Project(
                 args.dim,
-                self.n_kv_heads * self.head_dim,
-                bias=False
+                self.n_kv_heads * self.head_dim
             )
-            self.wv = torch.nn.Linear(
+            self.wv = Project(
                 args.dim,
-                self.n_kv_heads * self.head_dim,
-                bias=False
+                self.n_kv_heads * self.head_dim
             )
 
         self.wo = torch.nn.Linear(
