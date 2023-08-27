@@ -24,10 +24,9 @@ class ModelArgs:
     multiple_of: int = 256  # make SwiGLU hidden layer size multiple of large power of 2
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
-    n_kv_layers: int = 32
+
     max_batch_size: int = 32
     max_seq_len: int = 2048
-    max_cache_batch_size: int = 32
 
 
 class RMSNorm(torch.nn.Module):
@@ -62,15 +61,12 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
 def apply_rotary_emb(
     xq: torch.Tensor,
-    xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    return xq_out.type_as(xq)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -91,8 +87,6 @@ class Attention(nn.Module):
         self.max_seq_len = args.max_seq_len
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         self.n_local_heads = args.n_heads
-        self.n_local_kv_heads = self.n_kv_heads
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
         self.wq = torch.nn.Linear(
@@ -100,78 +94,29 @@ class Attention(nn.Module):
             args.n_heads * self.head_dim,
             bias=False
         )
-        self.wk = torch.nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
-        self.wv = torch.nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
+        
         self.wo = torch.nn.Linear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False
         )
 
-        self.cache_k = torch.zeros(
-            (
-                args.max_cache_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                args.max_cache_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-
     def forward(
         self,
         x: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
         is_training: bool,
     ):
         bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        xq = self.wq(x)
 
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-        if is_training:
-            keys = xk
-            values = xv
-        else:
-            self.cache_k = self.cache_k.to(xq)
-            self.cache_v = self.cache_v.to(xq)
-
-            if start_pos < self.max_seq_len:
-                self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-                self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
-            else:
-                self.cache_k = torch.roll(self.cache_k, shifts=-seqlen, dims=1)
-                self.cache_v = torch.roll(self.cache_v, shifts=-seqlen, dims=1)
-                self.cache_k[:bsz, -seqlen:] = xk
-                self.cache_v[:bsz, -seqlen:] = xv
-
-            keys = self.cache_k[:bsz, : start_pos + seqlen]
-            values = self.cache_v[:bsz, : start_pos + seqlen]
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        xq = apply_rotary_emb(xq, freqs_cis=freqs_cis)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)
@@ -217,6 +162,28 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
+class Project(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        out_dim: int,
+    ):
+        super().__init__()
+        hidden_dim = dim * 4
+
+        self.w1 = torch.nn.Linear(
+            dim, hidden_dim, bias=False
+        )
+        self.w2 = torch.nn.Linear(
+            hidden_dim, out_dim, bias=False
+        )
+        self.w3 = torch.nn.Linear(
+            dim, hidden_dim, bias=False
+        )
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, args: ModelArgs):
@@ -238,24 +205,31 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        keys: torch.Tensor,
+        values: torch.Tensor,
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
         is_training: bool,
     ):
         h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask, is_training
+            self.attention_norm(x), keys, values, start_pos, freqs_cis, mask, is_training
         )
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
 
-class LLaMA(nn.Module):
+class LLaMAGKV(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        self.n_kv_heads = params.n_heads if params.n_kv_heads is None else params.n_kv_heads
+        self.n_local_heads = params.n_heads
+        self.n_local_kv_heads = self.n_kv_heads
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        self.head_dim = params.dim // params.n_heads
 
         self.tok_embeddings = torch.nn.Embedding(
             params.vocab_size, params.dim
@@ -274,14 +248,42 @@ class LLaMA(nn.Module):
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
 
+        self.wk = Project(
+            params.dim,
+            self.n_kv_heads * self.head_dim
+        )
+        
+        self.wv = Project(
+            params.dim,
+            self.n_kv_heads * self.head_dim
+        )
+
+        self.proj_norm = RMSNorm(params.dim, eps=params.norm_eps)
+
+        self.cache_k = torch.zeros(
+            (
+                params.max_batch_size,
+                params.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
+        self.cache_v = torch.zeros(
+            (
+                params.max_batch_size,
+                params.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
+
     def forward(self, tokens: torch.Tensor, targets: torch.Tensor = None, start_pos: int = 0):
         is_training = targets is not None
-        _bsz, seqlen = tokens.shape
+        bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         self.freqs_cis = self.freqs_cis.to(h.device)
         freq_start = min(start_pos, (self.params.max_seq_len*2) - 1)
         freqs_cis = self.freqs_cis[freq_start : freq_start + seqlen]
-
         mask = None
         if seqlen > 1:
             mask = torch.full(
@@ -289,8 +291,38 @@ class LLaMA(nn.Module):
             )
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
+        # global key/value
+        xp = self.proj_norm(h)
+        xk, xv = self.wk(xp), self.wv(xp)
+        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xk = apply_rotary_emb(xk, freqs_cis=freqs_cis)
+
+        if is_training:
+            keys = xk
+            values = xv
+        else:
+            self.cache_k = self.cache_k.to(xk)
+            self.cache_v = self.cache_v.to(xk)
+
+            if start_pos < self.params.max_seq_len:
+                self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
+                self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            else:
+                self.cache_k = torch.roll(self.cache_k, shifts=-seqlen, dims=1)
+                self.cache_v = torch.roll(self.cache_v, shifts=-seqlen, dims=1)
+                self.cache_k[:bsz, -seqlen:] = xk
+                self.cache_v[:bsz, -seqlen:] = xv
+
+            keys = self.cache_k[:bsz, : start_pos + seqlen]
+            values = self.cache_v[:bsz, : start_pos + seqlen]
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        values = repeat_kv(values, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask, is_training)
+            h = layer(h, keys, values, start_pos, freqs_cis, mask, is_training)
         h = self.norm(h)
         output = self.output(h)
 

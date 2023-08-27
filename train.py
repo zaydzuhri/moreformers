@@ -8,6 +8,7 @@ import json
 import math
 import glob
 import numpy as np
+from torch.nn.functional import cross_entropy
 from torch.profiler import tensorboard_trace_handler
 from models.gpt import GPTConfig, GPT
 from models.gpt_modes import GPTModes
@@ -27,7 +28,10 @@ from models.lessformer_share import LessFormerShare
 from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
 from models.moreformer import MoreFormer
-from models.llama import LLaMA
+from models.llama_old import LLaMA as LLaMAOld
+from models.llama import LLaMA, ModelArgs
+from models.llama_gkv import LLaMAGKV
+from models.llama_mlkv import LLaMAMLKV
 from models.llama_mqa import LLaMAMQA
 from models.lessllama import LessLLaMA
 from models.nonellama import NoneLLaMA
@@ -44,6 +48,7 @@ from models.fadellama_v import FadeLLaMAV
 from models.fadellama_m import FadeLLaMAM
 from models.fadellama_ff import FadeLLaMAFF
 from models.fadellama_attff import FadeLLaMAAttFF
+from models.mixer import Mixer
 from contextlib import nullcontext
 from tqdm import tqdm
 
@@ -66,6 +71,7 @@ profile = False
 # data
 dataset = 'shakespeare'
 batch_size = 16
+cache_batch_size = 16
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 # model
 model_type = 'gpt' # 'gpt' or 'fadeformer'
@@ -76,7 +82,11 @@ ctx_size = 1024
 target_size = ctx_size # for fadeformer
 n_layer = 12
 n_head = 12
+n_kv_head = 12
+n_kv_layers = 4
 n_embd = 768
+multiple_of = 64
+ffn_dim_multiplier = None
 dropout = 0.0
 bias = False
 # optimizer
@@ -91,6 +101,8 @@ warmup_iters = 5000
 decay_lr = True
 lr_decay_iters = 600000
 min_lr = 6e-5
+# config type
+config_type = 'gpt' # or 'llama'
 # system
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device = torch.device('cpu')
@@ -104,7 +116,9 @@ ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=d
 # override globals with json file
 argparser = argparse.ArgumentParser()
 argparser.add_argument('--config', type=str, default=None, help='json file name in configs folder')
+argparser.add_argument('--last_k', type=int, default=None, help='number of last k tokens to use for evaluation')
 args = argparser.parse_args()
+last_k = args.last_k
 config = {}
 if args.config is not None:
     with open(os.path.join('configs', args.config+'.json'), 'r') as f:
@@ -143,8 +157,7 @@ def get_batch(split):
         target_size = int(ctx_size // (2**n_layer))
         y = torch.stack([torch.from_numpy((data[i+1+(ctx_size-target_size):i+1+ctx_size]).astype(np.int64)) for i in ix])
     else:
-        target_size = int(ctx_size // (2**(n_layer-2)))
-        y = torch.stack([torch.from_numpy((data[i+1+(ctx_size-target_size):i+1+ctx_size]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+ctx_size]).astype(np.int64)) for i in ix])
     if device.type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -153,16 +166,31 @@ def get_batch(split):
     return x, y
 
 # model init
-model_args = dict(
-    n_layer=n_layer, 
-    n_head=n_head, 
-    n_embd=n_embd, 
-    ctx_size=ctx_size,
-    bias=bias, 
-    vocab_size=None, 
-    dropout=dropout,
-    batch_size=batch_size,
-) # start with model_args from globals
+if config_type == 'gpt':
+    model_args = dict(
+        n_layer=n_layer, 
+        n_head=n_head, 
+        n_embd=n_embd, 
+        ctx_size=ctx_size,
+        bias=bias, 
+        vocab_size=None, 
+        dropout=dropout,
+        batch_size=batch_size,
+    ) # start with model_args from globals
+elif config_type == 'llama':
+    model_args = dict(
+        dim=n_embd,
+        n_layers=n_layer,
+        n_heads=n_head,
+        n_kv_heads=n_kv_head,
+        n_kv_layers=n_kv_layers,
+        vocab_size=None,
+        multiple_of=multiple_of,
+        ffn_dim_multiplier=ffn_dim_multiplier,
+        max_seq_len=ctx_size,
+        max_batch_size=batch_size,
+        max_cache_batch_size=cache_batch_size,
+    )
 
 # attempt to derive vocab_size from the dataset
 meta_path = os.path.join(data_dir, 'meta.pkl')
@@ -182,80 +210,92 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    if model_type == 'gpt':
-        model = GPT(gptconf)
-    elif model_type == 'gpt-modes':
-        model = GPTModes(gptconf)
-    elif model_type == 'fadeformer-linear':
-        model = FadeFormerLinear(gptconf)
-    elif model_type == 'fadeformer-rank':
-        model = FadeFormerRank(gptconf)
-    elif model_type == 'fadeformer-static':
-        model = FadeFormerStatic(gptconf)
-    elif model_type == 'fadeformer-stagger':
-        model = FadeFormerStagger(gptconf)
-    elif model_type == 'fadeformer-half':
-        model = FadeFormerHalf(gptconf)
-    elif model_type == 'fadeformer-pool':
-        model = FadeFormerPool(gptconf)
-    elif model_type == 'fadeformer-trans':
-        model = FadeFormerTrans(gptconf)
-    elif model_type == 'fadeformer-cut':
-        if pretrain:
-            model = FadeFormerCut(gptconf, pretrain=True)
-        else:
-            model = FadeFormerCut(gptconf)
-    elif model_type == 'fadeformer-even':
-        model = FadeFormerEven(gptconf)
-    elif model_type == 'fadeformer-residual':
-        model = FadeFormerResidual(gptconf)
-    elif model_type == 'lessformer-qkk':
-        model = LessFormerQKK(gptconf)
-    elif model_type == 'lessformer-mqa':
-        model = LessFormerMQA(gptconf)
-    elif model_type == 'lessformer-share':
-        model = LessFormerShare(gptconf)
-    elif model_type == 'lessformer-mqx':
-        model = LessFormerMQX(gptconf)
-    elif model_type == 'lessformer-mqxk':
-        model = LessFormerMQXK(gptconf)
-    elif model_type == 'moreformer':
-        model = MoreFormer(gptconf)
-    elif model_type == 'llama':
-        model = LLaMA(gptconf)
-    elif model_type == 'llama-mqa':
-        model = LLaMAMQA(gptconf)
-    elif model_type == 'lessllama':
-        model = LessLLaMA(gptconf)
-    elif model_type == 'nonellama':
-        model = NoneLLaMA(gptconf)
-    elif model_type == 'weightllama':
-        model = WeightLLaMA(gptconf)
-    elif model_type == 'buffllama':
-        model = BuffLLaMA(gptconf)
-    elif model_type == 'sumllama':
-        model = SumLLaMA(gptconf)
-    elif model_type == 'doublellama':
-        model = DoubleLLaMA(gptconf)
-    elif model_type == 'localllama':
-        model = LocalLLaMA(gptconf)
-    elif model_type == 'fadellama':
-        model = FadeLLaMA(gptconf)
-    elif model_type == 'fadellama-sum':
-        model = FadeLLaMASum(gptconf)
-    elif model_type == 'fadellama-invert':
-        model = FadeLLaMAInvert(gptconf)
-    elif model_type == 'fadellama-post':
-        model = FadeLLaMAPost(gptconf)
-    elif model_type == 'fadellama-v':
-        model = FadeLLaMAV(gptconf)
-    elif model_type == 'fadellama-m':
-        model = FadeLLaMAM(gptconf)
-    elif model_type == 'fadellama-ff':
-        model = FadeLLaMAFF(gptconf)
-    elif model_type == 'fadellama-attff':
-        model = FadeLLaMAAttFF(gptconf)
+    if config_type == 'gpt':
+        gptconf = GPTConfig(**model_args)
+        if model_type == 'gpt':
+            model = GPT(gptconf)
+        elif model_type == 'gpt-modes':
+            model = GPTModes(gptconf)
+        elif model_type == 'fadeformer-linear':
+            model = FadeFormerLinear(gptconf)
+        elif model_type == 'fadeformer-rank':
+            model = FadeFormerRank(gptconf)
+        elif model_type == 'fadeformer-static':
+            model = FadeFormerStatic(gptconf)
+        elif model_type == 'fadeformer-stagger':
+            model = FadeFormerStagger(gptconf)
+        elif model_type == 'fadeformer-half':
+            model = FadeFormerHalf(gptconf)
+        elif model_type == 'fadeformer-pool':
+            model = FadeFormerPool(gptconf)
+        elif model_type == 'fadeformer-trans':
+            model = FadeFormerTrans(gptconf)
+        elif model_type == 'fadeformer-cut':
+            if pretrain:
+                model = FadeFormerCut(gptconf, pretrain=True)
+            else:
+                model = FadeFormerCut(gptconf)
+        elif model_type == 'fadeformer-even':
+            model = FadeFormerEven(gptconf)
+        elif model_type == 'fadeformer-residual':
+            model = FadeFormerResidual(gptconf)
+        elif model_type == 'lessformer-qkk':
+            model = LessFormerQKK(gptconf)
+        elif model_type == 'lessformer-mqa':
+            model = LessFormerMQA(gptconf)
+        elif model_type == 'lessformer-share':
+            model = LessFormerShare(gptconf)
+        elif model_type == 'lessformer-mqx':
+            model = LessFormerMQX(gptconf)
+        elif model_type == 'lessformer-mqxk':
+            model = LessFormerMQXK(gptconf)
+        elif model_type == 'moreformer':
+            model = MoreFormer(gptconf)
+        elif model_type == 'llama':
+            model = LLaMAOld(gptconf)
+        elif model_type == 'llama-mqa':
+            model = LLaMAMQA(gptconf)
+        elif model_type == 'lessllama':
+            model = LessLLaMA(gptconf)
+        elif model_type == 'nonellama':
+            model = NoneLLaMA(gptconf)
+        elif model_type == 'weightllama':
+            model = WeightLLaMA(gptconf)
+        elif model_type == 'buffllama':
+            model = BuffLLaMA(gptconf)
+        elif model_type == 'sumllama':
+            model = SumLLaMA(gptconf)
+        elif model_type == 'doublellama':
+            model = DoubleLLaMA(gptconf)
+        elif model_type == 'localllama':
+            model = LocalLLaMA(gptconf)
+        elif model_type == 'fadellama':
+            model = FadeLLaMA(gptconf)
+        elif model_type == 'fadellama-sum':
+            model = FadeLLaMASum(gptconf)
+        elif model_type == 'fadellama-invert':
+            model = FadeLLaMAInvert(gptconf)
+        elif model_type == 'fadellama-post':
+            model = FadeLLaMAPost(gptconf)
+        elif model_type == 'fadellama-v':
+            model = FadeLLaMAV(gptconf)
+        elif model_type == 'fadellama-m':
+            model = FadeLLaMAM(gptconf)
+        elif model_type == 'fadellama-ff':
+            model = FadeLLaMAFF(gptconf)
+        elif model_type == 'fadellama-attff':
+            model = FadeLLaMAAttFF(gptconf)
+    elif config_type == 'llama':
+        conf = ModelArgs(**model_args)
+        if model_type == 'llama':
+            model = LLaMA(conf)
+        elif model_type == 'llama-gkv':
+            model = LLaMAGKV(conf)
+        elif model_type == 'llama-mlkv':
+            model = LLaMAMLKV(conf)
+        elif model_type == 'mixer':
+            model = Mixer(conf)
+            
 elif init_from == 'continue':
     print('Continuing from checkpoint')
     # init from a model saved in a specific directory
@@ -339,6 +379,11 @@ def estimate_loss_perplexity():
             # target_size = int(ctx_size // (2**(n_layer-2)))
             # # take only the last target_size tokens for evaluation
             # loss = loss[:, -target_size:]
+            # calculate loss for only the last_k tokens
+            if last_k is not None:
+                logits = logits[:, -last_k:, :]
+                Y = Y[:, -last_k:]
+                loss = cross_entropy(logits.reshape(-1, logits.size(-1)), Y.reshape(-1), ignore_index=-1)
             losses[k] = loss.item()
         # compute the average loss and perplexity
         out[split] = {'loss': losses.mean(), 'perplexity': torch.exp(losses).mean()}

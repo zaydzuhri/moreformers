@@ -114,10 +114,9 @@ class Block(nn.Module):
         out = x[:, -out.shape[1]:, :] + out
         out = out + self.ff(self.norm2(out))
 
-        if self.fade:
+        if self.fade and is_training:
             # restore x
             out = torch.cat((out_og[:, :-self.T_fade, :], out), dim=1)
-        
         return out
 
 # LLaMA model

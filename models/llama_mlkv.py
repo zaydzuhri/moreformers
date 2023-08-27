@@ -27,8 +27,7 @@ class ModelArgs:
     n_kv_layers: int = 32
     max_batch_size: int = 32
     max_seq_len: int = 2048
-    max_cache_batch_size: int = 32
-
+    max_cache_batch_size: int = 256
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -62,15 +61,12 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
 
 def apply_rotary_emb(
     xq: torch.Tensor,
-    xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    return xq_out.type_as(xq)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -84,10 +80,32 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
+class Project(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        out_dim: int,
+    ):
+        super().__init__()
+        hidden_dim = dim * 4
+
+        self.w1 = torch.nn.Linear(
+            dim, hidden_dim, bias=False
+        )
+        self.w2 = torch.nn.Linear(
+            hidden_dim, out_dim, bias=False
+        )
+        self.w3 = torch.nn.Linear(
+            dim, hidden_dim, bias=False
+        )
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, has_kv: bool, args: ModelArgs):
         super().__init__()
+        self.has_kv = has_kv
         self.max_seq_len = args.max_seq_len
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         self.n_local_heads = args.n_heads
@@ -100,74 +118,61 @@ class Attention(nn.Module):
             args.n_heads * self.head_dim,
             bias=False
         )
-        self.wk = torch.nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
-        self.wv = torch.nn.Linear(
-            args.dim,
-            self.n_kv_heads * self.head_dim,
-            bias=False
-        )
+
+        if has_kv:
+            self.wk = torch.nn.Linear(
+                args.dim,
+                self.n_kv_heads * self.head_dim,
+                bias=False
+            )
+            self.wv = torch.nn.Linear(
+                args.dim,
+                self.n_kv_heads * self.head_dim,
+                bias=False
+            )
+
         self.wo = torch.nn.Linear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False
         )
 
-        self.cache_k = torch.zeros(
-            (
-                args.max_cache_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-        self.cache_v = torch.zeros(
-            (
-                args.max_cache_batch_size,
-                args.max_seq_len,
-                self.n_local_kv_heads,
-                self.head_dim,
-            )
-        ).cuda()
-
     def forward(
         self,
         x: torch.Tensor,
+        keys: Optional[torch.Tensor],
+        values: Optional[torch.Tensor],
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
         is_training: bool,
     ):
         bsz, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-
+        xq = self.wq(x)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        xq = apply_rotary_emb(xq, freqs_cis=freqs_cis)
+        
+        if self.has_kv:
+            xk, xv = self.wk(x), self.wv(x)
+            xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+            xk = apply_rotary_emb(xk, freqs_cis=freqs_cis)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
-
-        if is_training:
-            keys = xk
-            values = xv
-        else:
-            self.cache_k = self.cache_k.to(xq)
-            self.cache_v = self.cache_v.to(xq)
-
-            if start_pos < self.max_seq_len:
-                self.cache_k[:bsz, start_pos : start_pos + seqlen] = xk
-                self.cache_v[:bsz, start_pos : start_pos + seqlen] = xv
+            if is_training:
+                keys = xk
+                values = xv
             else:
-                self.cache_k = torch.roll(self.cache_k, shifts=-seqlen, dims=1)
-                self.cache_v = torch.roll(self.cache_v, shifts=-seqlen, dims=1)
-                self.cache_k[:bsz, -seqlen:] = xk
-                self.cache_v[:bsz, -seqlen:] = xv
-
-            keys = self.cache_k[:bsz, : start_pos + seqlen]
-            values = self.cache_v[:bsz, : start_pos + seqlen]
+                if start_pos < self.max_seq_len:
+                    keys[:bsz, start_pos : start_pos + seqlen] = xk
+                    values[:bsz, start_pos : start_pos + seqlen] = xv
+                else:
+                    keys = torch.roll(keys, shifts=-seqlen, dims=1)
+                    values = torch.roll(values, shifts=-seqlen, dims=1)
+                    keys[:bsz, -seqlen:] = xk
+                    values[:bsz, -seqlen:] = xv
+            
+        o_keys = keys
+        o_values = values
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(keys, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -186,7 +191,7 @@ class Attention(nn.Module):
 
         output = torch.matmul(scores, values)  # (bs, n_local_heads, seqlen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-        return self.wo(output)
+        return self.wo(output), o_keys, o_values
 
 
 class FeedForward(nn.Module):
@@ -219,12 +224,12 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, has_kv: bool, args: ModelArgs):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.attention = Attention(has_kv, args)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=4 * args.dim,
@@ -238,32 +243,45 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
+        keys: Optional[torch.Tensor],
+        values: Optional[torch.Tensor],
         start_pos: int,
         freqs_cis: torch.Tensor,
         mask: Optional[torch.Tensor],
         is_training: bool,
     ):
-        h = x + self.attention.forward(
-            self.attention_norm(x), start_pos, freqs_cis, mask, is_training
+        h, keys, values = self.attention.forward(
+            self.attention_norm(x), keys, values, start_pos, freqs_cis, mask, is_training
         )
+        h = x + h
         out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        return out, keys, values
 
 
-class LLaMA(nn.Module):
+class LLaMAMLKV(nn.Module):
     def __init__(self, params: ModelArgs):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
+        self.n_kv_heads = params.n_heads if params.n_kv_heads is None else params.n_kv_heads
+        self.n_local_kv_heads = self.n_kv_heads
+        self.head_dim = params.dim // params.n_heads
 
         self.tok_embeddings = torch.nn.Embedding(
             params.vocab_size, params.dim
         )
 
+        # list layer indices that will host a kv head. first is always 0, rest is spread evenly until there are total n_kv_layers
+        # example: n_layers=32, n_kv_layers=4 -> kv_layers=[0, 8, 16, 24]
+        self.kv_layers = [0] + [
+            int((i + 1) * (params.n_layers / params.n_kv_layers))
+            for i in range(params.n_kv_layers - 1)
+        ]
+
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
+            self.layers.append(TransformerBlock(layer_id, (layer_id in self.kv_layers), params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = torch.nn.Linear(
@@ -273,6 +291,25 @@ class LLaMA(nn.Module):
         self.freqs_cis = precompute_freqs_cis(
             self.params.dim // self.params.n_heads, self.params.max_seq_len * 2
         )
+
+        self.cache_k = torch.zeros(
+            (
+                params.n_kv_layers,
+                params.max_cache_batch_size,
+                params.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
+        self.cache_v = torch.zeros(
+            (
+                params.n_kv_layers,
+                params.max_cache_batch_size,
+                params.max_seq_len,
+                self.n_local_kv_heads,
+                self.head_dim,
+            )
+        ).cuda()
 
     def forward(self, tokens: torch.Tensor, targets: torch.Tensor = None, start_pos: int = 0):
         is_training = targets is not None
@@ -289,8 +326,23 @@ class LLaMA(nn.Module):
             )
             mask = torch.triu(mask, diagonal=start_pos + 1).type_as(h)
 
+        self.cache_k = self.cache_k.to(h.device)
+        self.cache_v = self.cache_v.to(h.device)
+        keys = None
+        values = None
         for layer in self.layers:
-            h = layer(h, start_pos, freqs_cis, mask, is_training)
+            i = layer.layer_id
+            kv_i = max([ix for ix, l in enumerate(self.kv_layers) if l <= i])
+            if not is_training:
+                keys = self.cache_k[kv_i, :_bsz, : start_pos + seqlen]
+                values = self.cache_v[kv_i, :_bsz, : start_pos + seqlen]
+
+            h, keys, values = layer(h, keys, values, start_pos, freqs_cis, mask, is_training)
+
+            if not is_training and i in self.kv_layers:
+                self.cache_k[kv_i, :_bsz, : start_pos + seqlen] = keys
+                self.cache_v[kv_i, :_bsz, : start_pos + seqlen] = values
+
         h = self.norm(h)
         output = self.output(h)
 
@@ -298,7 +350,6 @@ class LLaMA(nn.Module):
             loss = F.cross_entropy(output.view(-1, output.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             loss = None
-
         return output, loss
     
     @torch.no_grad()

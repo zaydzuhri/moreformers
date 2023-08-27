@@ -24,7 +24,10 @@ from models.lessformer_qkk import LessFormerQKK
 from models.lessformer_mqa import LessFormerMQA
 from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
-from models.llama import LLaMA
+from models.llama import LLaMA, ModelArgs
+from models.llama import LLaMA as LLaMAOld
+from models.llama_gkv import LLaMAGKV
+from models.llama_mlkv import LLaMAMLKV
 from models.llama_mqa import LLaMAMQA
 from models.lessllama import LessLLaMA
 from models.nonellama import NoneLLaMA
@@ -44,6 +47,7 @@ from models.fadellama_attff import FadeLLaMAAttFF
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
 model_type = 'gpt'
+config_type = 'gpt' # or llama
 model_name = 'mini-gpt'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 1 # number of samples to draw
@@ -59,10 +63,12 @@ argparser = argparse.ArgumentParser()
 argparser.add_argument('--start', type=str, default=start)
 argparser.add_argument('--model_type', type=str, default=model_type)
 argparser.add_argument('--model_name', type=str, default=model_name)
+argparser.add_argument('--config_type', type=str, default=config_type)
 args = argparser.parse_args()
 start = args.start
 model_name = args.model_name
 model_type = args.model_type
+config_type = args.config_type
 # -----------------------------------------------------------------------------
 torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
@@ -74,71 +80,80 @@ ctx = nullcontext() if device.type == 'cpu' else torch.cuda.amp.autocast(dtype=p
 # init from a model saved in a specific directory
 ckpt_path = os.path.join(out_dir, model_name+'.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
-gptconf = GPTConfig(**checkpoint['model_args'])
-if model_type == 'gpt':
-    model = GPT(gptconf)
-elif model_type == 'gpt-modes':
-    model = GPTModes(gptconf)
-elif model_type == 'fadeformer-linear':
-    model = FadeFormerLinear(gptconf)
-elif model_type == 'fadeformer-rank':
-    model = FadeFormerRank(gptconf)
-elif model_type == 'fadeformer-static':
-    model = FadeFormerStatic(gptconf)
-elif model_type == 'fadeformer-stagger':
-    model = FadeFormerStagger(gptconf)
-elif model_type == 'fadeformer-half':
-    model = FadeFormerHalf(gptconf)
-elif model_type == 'fadeformer-pool':
-    model = FadeFormerPool(gptconf)
-elif model_type == 'fadeformer-trans':
-    model = FadeFormerTrans(gptconf)
-elif model_type == 'fadeformer-cut':
-    model = FadeFormerCut(gptconf)
-elif model_type == 'fadeformer-even':
-    model = FadeFormerEven(gptconf)
-elif model_type == 'fadeformer-residual':
-    model = FadeFormerResidual(gptconf)
-elif model_type == 'lessformer-qkk':
-    model = LessFormerQKK(gptconf)
-elif model_type == 'lessformer-mqa':
-    model = LessFormerMQA(gptconf)
-elif model_type == 'lessformer-mqx':
-    model = LessFormerMQX(gptconf)
-elif model_type == 'lessformer-mqxk':
-    model = LessFormerMQXK(gptconf)
-elif model_type == 'llama':
-    model = LLaMA(gptconf)
-elif model_type == 'llama-mqa':
-    model = LLaMAMQA(gptconf)
-elif model_type == 'lessllama':
-    model = LessLLaMA(gptconf)
-elif model_type == 'nonellama':
-    model = NoneLLaMA(gptconf)
-elif model_type == 'weightllama':
-    model = WeightLLaMA(gptconf)
-elif model_type == 'buffllama':
-    model = BuffLLaMA(gptconf)
-elif model_type == 'sumllama':
-    model = SumLLaMA(gptconf)
-elif model_type == 'doublellama':
-    model = DoubleLLaMA(gptconf)
-elif model_type == 'localllama':
-    model = LocalLLaMA(gptconf)
-elif model_type == 'fadellama':
-    model = FadeLLaMA(gptconf)
-elif model_type == 'fadellama-sum':
-    model = FadeLLaMASum(gptconf)
-elif model_type == 'fadellama-invert':
-    model = FadeLLaMAInvert(gptconf)
-elif model_type == 'fadellama-post':
-    model = FadeLLaMAPost(gptconf)
-elif model_type == 'fadellama-v':
-    model = FadeLLaMAV(gptconf)
-elif model_type == 'fadellama-ff':
-    model = FadeLLaMAFF(gptconf)
-elif model_type == 'fadellama-attff':
-    model = FadeLLaMAAttFF(gptconf)
+if config_type == 'gpt':
+    gptconf = GPTConfig(**checkpoint['model_args'])
+    if model_type == 'gpt':
+        model = GPT(gptconf)
+    elif model_type == 'gpt-modes':
+        model = GPTModes(gptconf)
+    elif model_type == 'fadeformer-linear':
+        model = FadeFormerLinear(gptconf)
+    elif model_type == 'fadeformer-rank':
+        model = FadeFormerRank(gptconf)
+    elif model_type == 'fadeformer-static':
+        model = FadeFormerStatic(gptconf)
+    elif model_type == 'fadeformer-stagger':
+        model = FadeFormerStagger(gptconf)
+    elif model_type == 'fadeformer-half':
+        model = FadeFormerHalf(gptconf)
+    elif model_type == 'fadeformer-pool':
+        model = FadeFormerPool(gptconf)
+    elif model_type == 'fadeformer-trans':
+        model = FadeFormerTrans(gptconf)
+    elif model_type == 'fadeformer-cut':
+        model = FadeFormerCut(gptconf)
+    elif model_type == 'fadeformer-even':
+        model = FadeFormerEven(gptconf)
+    elif model_type == 'fadeformer-residual':
+        model = FadeFormerResidual(gptconf)
+    elif model_type == 'lessformer-qkk':
+        model = LessFormerQKK(gptconf)
+    elif model_type == 'lessformer-mqa':
+        model = LessFormerMQA(gptconf)
+    elif model_type == 'lessformer-mqx':
+        model = LessFormerMQX(gptconf)
+    elif model_type == 'lessformer-mqxk':
+        model = LessFormerMQXK(gptconf)
+    elif model_type == 'llama':
+        model = LLaMAOld(gptconf)
+    elif model_type == 'llama-mqa':
+        model = LLaMAMQA(gptconf)
+    elif model_type == 'lessllama':
+        model = LessLLaMA(gptconf)
+    elif model_type == 'nonellama':
+        model = NoneLLaMA(gptconf)
+    elif model_type == 'weightllama':
+        model = WeightLLaMA(gptconf)
+    elif model_type == 'buffllama':
+        model = BuffLLaMA(gptconf)
+    elif model_type == 'sumllama':
+        model = SumLLaMA(gptconf)
+    elif model_type == 'doublellama':
+        model = DoubleLLaMA(gptconf)
+    elif model_type == 'localllama':
+        model = LocalLLaMA(gptconf)
+    elif model_type == 'fadellama':
+        model = FadeLLaMA(gptconf)
+    elif model_type == 'fadellama-sum':
+        model = FadeLLaMASum(gptconf)
+    elif model_type == 'fadellama-invert':
+        model = FadeLLaMAInvert(gptconf)
+    elif model_type == 'fadellama-post':
+        model = FadeLLaMAPost(gptconf)
+    elif model_type == 'fadellama-v':
+        model = FadeLLaMAV(gptconf)
+    elif model_type == 'fadellama-ff':
+        model = FadeLLaMAFF(gptconf)
+    elif model_type == 'fadellama-attff':
+        model = FadeLLaMAAttFF(gptconf)
+elif config_type == 'llama':
+    conf = ModelArgs(**checkpoint['model_args'])
+    if model_type == 'llama':
+        model = LLaMA(conf)
+    elif model_type == 'llama-gkv':
+        model = LLaMAGKV(conf)
+    elif model_type == 'llama-mlkv':
+        model = LLaMAMLKV(conf)
 
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)

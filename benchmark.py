@@ -9,6 +9,7 @@ import tiktoken
 import argparse
 import time
 import numpy as np
+from tqdm import tqdm
 from torch.nn.functional import cross_entropy
 from models.gpt import GPTConfig, GPT
 from models.gpt_modes import GPTModes
@@ -26,7 +27,10 @@ from models.lessformer_qkk import LessFormerQKK
 from models.lessformer_mqa import LessFormerMQA
 from models.lessformer_mqx import LessFormerMQX
 from models.lessformer_mqxk import LessFormerMQXK
-from models.llama import LLaMA
+from models.llama_old import LLaMA as LLaMAOld
+from models.llama import LLaMA, ModelArgs
+from models.llama_gkv import LLaMAGKV
+from models.llama_mlkv import LLaMAMLKV
 from models.llama_mqa import LLaMAMQA
 from models.lessllama import LessLLaMA
 from models.nonellama import NoneLLaMA
@@ -47,6 +51,7 @@ from models.fadellama_fflin import FadeLLaMAFFLin
 # -----------------------------------------------------------------------------
 out_dir = 'out' # model output directory
 model_type = 'gpt'
+config_type = 'gpt' # or llama
 model_name = 'mini-gpt'
 seed = 420
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -55,14 +60,17 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 
 argparser = argparse.ArgumentParser()
 argparser.add_argument('--model_type', type=str, default=model_type)
+argparser.add_argument('--config_type', type=str, default=config_type)
 argparser.add_argument('--model_name', type=str, default=model_name)
 argparser.add_argument('--dataset', type=str, default='poetry')
 argparser.add_argument('--eval_iters', type=int, default=100)
 argparser.add_argument('--last_k', type=int, default=None)
 argparser.add_argument('--ctx_size', type=int, default=None)
+argparser.add_argument('--batch_size', type=int, default=None)
 args = argparser.parse_args()
 model_name = args.model_name
 model_type = args.model_type
+config_type = args.config_type
 eval_iters = args.eval_iters
 last_k = args.last_k
 dataset = args.dataset
@@ -106,73 +114,84 @@ def get_batch(split):
 # init from a model saved in a specific directory
 ckpt_path = os.path.join(out_dir, model_name+'.pt')
 checkpoint = torch.load(ckpt_path, map_location=device)
-gptconf = GPTConfig(**checkpoint['model_args'])
-if model_type == 'gpt':
-    model = GPT(gptconf)
-elif model_type == 'gpt-modes':
-    model = GPTModes(gptconf)
-elif model_type == 'fadeformer-linear':
-    model = FadeFormerLinear(gptconf)
-elif model_type == 'fadeformer-rank':
-    model = FadeFormerRank(gptconf)
-elif model_type == 'fadeformer-static':
-    model = FadeFormerStatic(gptconf)
-elif model_type == 'fadeformer-stagger':
-    model = FadeFormerStagger(gptconf)
-elif model_type == 'fadeformer-half':
-    model = FadeFormerHalf(gptconf)
-elif model_type == 'fadeformer-pool':
-    model = FadeFormerPool(gptconf)
-elif model_type == 'fadeformer-trans':
-    model = FadeFormerTrans(gptconf)
-elif model_type == 'fadeformer-cut':
-    model = FadeFormerCut(gptconf)
-elif model_type == 'fadeformer-even':
-    model = FadeFormerEven(gptconf)
-elif model_type == 'fadeformer-residual':
-    model = FadeFormerResidual(gptconf)
-elif model_type == 'lessformer-qkk':
-    model = LessFormerQKK(gptconf)
-elif model_type == 'lessformer-mqa':
-    model = LessFormerMQA(gptconf)
-elif model_type == 'lessformer-mqx':
-    model = LessFormerMQX(gptconf)
-elif model_type == 'lessformer-mqxk':
-    model = LessFormerMQXK(gptconf)
-elif model_type == 'llama':
-    model = LLaMA(gptconf)
-elif model_type == 'llama-mqa':
-    model = LLaMAMQA(gptconf)
-elif model_type == 'lessllama':
-    model = LessLLaMA(gptconf)
-elif model_type == 'nonellama':
-    model = NoneLLaMA(gptconf)
-elif model_type == 'weightllama':
-    model = WeightLLaMA(gptconf)
-elif model_type == 'buffllama':
-    model = BuffLLaMA(gptconf)
-elif model_type == 'sumllama':
-    model = SumLLaMA(gptconf)
-elif model_type == 'doublellama':
-    model = DoubleLLaMA(gptconf)
-elif model_type == 'localllama':
-    model = LocalLLaMA(gptconf)
-elif model_type == 'fadellama':
-    model = FadeLLaMA(gptconf)
-elif model_type == 'fadellama-sum':
-    model = FadeLLaMASum(gptconf)
-elif model_type == 'fadellama-invert':
-    model = FadeLLaMAInvert(gptconf)
-elif model_type == 'fadellama-post':
-    model = FadeLLaMAPost(gptconf)
-elif model_type == 'fadellama-v':
-    model = FadeLLaMAV(gptconf)
-elif model_type == 'fadellama-ff':
-    model = FadeLLaMAFF(gptconf)
-elif model_type == 'fadellama-attff':
-    model = FadeLLaMAAttFF(gptconf)
-elif model_type == 'fadellama-fflin':
-    model = FadeLLaMAFFLin(gptconf)
+if config_type == 'gpt':
+    gptconf = GPTConfig(**checkpoint['model_args'])
+    if model_type == 'gpt':
+        model = GPT(gptconf)
+    elif model_type == 'gpt-modes':
+        model = GPTModes(gptconf)
+    elif model_type == 'fadeformer-linear':
+        model = FadeFormerLinear(gptconf)
+    elif model_type == 'fadeformer-rank':
+        model = FadeFormerRank(gptconf)
+    elif model_type == 'fadeformer-static':
+        model = FadeFormerStatic(gptconf)
+    elif model_type == 'fadeformer-stagger':
+        model = FadeFormerStagger(gptconf)
+    elif model_type == 'fadeformer-half':
+        model = FadeFormerHalf(gptconf)
+    elif model_type == 'fadeformer-pool':
+        model = FadeFormerPool(gptconf)
+    elif model_type == 'fadeformer-trans':
+        model = FadeFormerTrans(gptconf)
+    elif model_type == 'fadeformer-cut':
+        model = FadeFormerCut(gptconf)
+    elif model_type == 'fadeformer-even':
+        model = FadeFormerEven(gptconf)
+    elif model_type == 'fadeformer-residual':
+        model = FadeFormerResidual(gptconf)
+    elif model_type == 'lessformer-qkk':
+        model = LessFormerQKK(gptconf)
+    elif model_type == 'lessformer-mqa':
+        model = LessFormerMQA(gptconf)
+    elif model_type == 'lessformer-mqx':
+        model = LessFormerMQX(gptconf)
+    elif model_type == 'lessformer-mqxk':
+        model = LessFormerMQXK(gptconf)
+    elif model_type == 'llama':
+        model = LLaMAOld(gptconf)
+    elif model_type == 'llama-mqa':
+        model = LLaMAMQA(gptconf)
+    elif model_type == 'lessllama':
+        model = LessLLaMA(gptconf)
+    elif model_type == 'nonellama':
+        model = NoneLLaMA(gptconf)
+    elif model_type == 'weightllama':
+        model = WeightLLaMA(gptconf)
+    elif model_type == 'buffllama':
+        model = BuffLLaMA(gptconf)
+    elif model_type == 'sumllama':
+        model = SumLLaMA(gptconf)
+    elif model_type == 'doublellama':
+        model = DoubleLLaMA(gptconf)
+    elif model_type == 'localllama':
+        model = LocalLLaMA(gptconf)
+    elif model_type == 'fadellama':
+        model = FadeLLaMA(gptconf)
+    elif model_type == 'fadellama-sum':
+        model = FadeLLaMASum(gptconf)
+    elif model_type == 'fadellama-invert':
+        model = FadeLLaMAInvert(gptconf)
+    elif model_type == 'fadellama-post':
+        model = FadeLLaMAPost(gptconf)
+    elif model_type == 'fadellama-v':
+        model = FadeLLaMAV(gptconf)
+    elif model_type == 'fadellama-ff':
+        model = FadeLLaMAFF(gptconf)
+    elif model_type == 'fadellama-attff':
+        model = FadeLLaMAAttFF(gptconf)
+    elif model_type == 'fadellama-fflin':
+        model = FadeLLaMAFFLin(gptconf)
+    elif model_type == 'fadellama-attff-fr':
+        model = FadeLLaMAAttFFFR(gptconf)
+elif config_type == 'llama':
+    conf = ModelArgs(**checkpoint['model_args'])
+    if model_type == 'llama':
+        model = LLaMA(conf)
+    elif model_type == 'llama-gkv':
+        model = LLaMAGKV(conf)
+    elif model_type == 'llama-mlkv':
+        model = LLaMAMLKV(conf)
 
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.' # remove weird prefix (according to nanoGPT)
@@ -183,8 +202,18 @@ model.load_state_dict(state_dict)
 
 # load hyperparams to a dict
 config = checkpoint['model_args']
+# rename max_seq_len to ctx_size if it exists
+if 'max_seq_len' in config:
+    config['ctx_size'] = config.pop('max_seq_len')
+# rename max_batch_size to batch_size if it exists
+if 'max_batch_size' in config:
+    config['batch_size'] = config.pop('max_batch_size')
+
 if args.ctx_size is not None:
     config['ctx_size'] = args.ctx_size
+if args.batch_size is not None:
+    config['batch_size'] = args.batch_size
+
 print(f"model: {model_name}, dataset: {dataset}")
 print(f"model_type: {model_type}")
 print(f"last_k: {last_k}, eval_iters: {eval_iters}, ctx_size: {config['ctx_size']}")
@@ -202,9 +231,34 @@ start_event_forward = torch.cuda.Event(enable_timing=True)
 end_event_forward = torch.cuda.Event(enable_timing=True)
 start_event_backward = torch.cuda.Event(enable_timing=True)
 end_event_backward = torch.cuda.Event(enable_timing=True)
-generate_times = []
 forward_times = []
 backward_times = []
+
+print('Timing generation...')
+with ctx:
+    # generate the sequence with the given context size, starting from newline
+    n = torch.tensor([[198] for _ in range(config['batch_size'])], dtype=torch.long, device=device)
+    
+    # get the initial memory usage
+    init_mem = torch.cuda.memory_allocated(device)
+
+    # time generation with pytorch cuda events
+    torch.cuda.synchronize()
+    start_event_generate.record()
+
+    pred = model.generate(n, max_new_tokens=config['ctx_size']*2, temperature=1.0, top_k=None)
+
+    end_event_generate.record()
+    torch.cuda.synchronize()
+
+    # get the final memory usage
+    final_mem = torch.cuda.memory_allocated(device)
+
+    # compute the difference in memory usage
+    mem_usage = final_mem - init_mem
+
+    # compute the time in milliseconds divided by the number of tokens
+    generate_time = start_event_generate.elapsed_time(end_event_generate)/(config['ctx_size']*2)
 
 # estimator for averaging loss and perplexity over several batches and both splits
 def estimate_loss_perplexity():
@@ -212,20 +266,9 @@ def estimate_loss_perplexity():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        for k in tqdm(range(eval_iters), desc=split):
             X, Y = get_batch(split)
             with ctx:
-                # time generation with pytorch cuda events
-                torch.cuda.synchronize()
-                start_event_generate.record()
-
-                pred = model.generate(X, max_new_tokens=1, temperature=1.0, top_k=None)
-
-                end_event_generate.record()
-                torch.cuda.synchronize()
-                # compute the time in milliseconds
-                generate_times.append(start_event_generate.elapsed_time(end_event_generate))
-
                 # time the forward pass with pytorch cuda events
                 torch.cuda.synchronize()
                 start_event_forward.record()
@@ -264,6 +307,7 @@ print('Evaluating...')
 loss_perplexity = estimate_loss_perplexity()
 print(f"train loss: {loss_perplexity['train']['loss']:.02f}, perplexity: {loss_perplexity['train']['perplexity']:.02f}")
 print(f"val loss: {loss_perplexity['val']['loss']:.02f}, perplexity: {loss_perplexity['val']['perplexity']:.02f}")
-print(f"Average generation time: {sum(generate_times)/len(generate_times):.02f}ms/token")
+print(f"Average generation time: {generate_time:.02f}ms/token")
 print(f"Average forward pass time: {sum(forward_times)/len(forward_times):.02f}ms")
 print(f"Average backward pass time: {sum(backward_times)/len(backward_times):.02f}ms")
+print(f"Memory usage: {mem_usage/1024**2:.02f}MB")
